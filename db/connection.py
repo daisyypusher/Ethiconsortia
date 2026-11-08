@@ -14,11 +14,16 @@ sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 import mysql.connector
 from mysql.connector import Error as MySQLError
 
-URL_HOST = "localhost"
-URL_PORT = 3306
-URL_DB = "ethiconsortia"
-USER = "root"
-PASSWORD = ""  # XAMPP default has no password
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+URL_HOST = os.getenv("DB_HOST")
+URL_PORT = int(os.getenv("DB_PORT", "3306"))
+URL_DB = os.getenv("DB_NAME")
+USER = os.getenv("DB_USER")
+PASSWORD = os.getenv("DB_PASSWORD")
 
 _connection = None
 
