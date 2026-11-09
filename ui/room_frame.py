@@ -67,6 +67,7 @@ class RoomFrame(tk.Toplevel):
         self._img_refs = []  # keep PhotoImage references alive
         self._last_msg_sig = None       # what the chat currently shows
         self._last_members_sig = None   # what the members list currently shows
+        self._last_dm_toast_id = 0      # newest DM already previewed
 
         self.title(f"Ethiconsortia  \u2014  {room_name}")
         self.geometry("1150x750")
@@ -832,6 +833,13 @@ class RoomFrame(tk.Toplevel):
             )
             rows = cur.fetchall()
             cur.close()
+            if self.selected_is_private:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE room_messages SET receiver_read=1 WHERE sub_room_id=%s "
+                    "AND receiver_id=%s AND receiver_read=0",
+                    (self.selected_sub_room_id, self.current_user_id))
+                cur.close()
         except Exception as ex:
             print(f"refresh_messages error: {ex}")
             return
@@ -1106,6 +1114,49 @@ class RoomFrame(tk.Toplevel):
         widget.bind(sequence, callback)
         for child in widget.winfo_children():
             self._bind_recursive(child, sequence, callback)
+
+    def check_dm_preview(self):
+        """Professors only: pops a small preview (student name + room name)
+        when a new private message arrives in a DM they don't have open."""
+        if self.current_sys_role != "professor":
+            return
+        try:
+            conn = get_connection()
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                """
+                SELECT m.message_id, u.full_name, u.username, r.room_name
+                FROM room_messages m
+                JOIN users u ON u.user_id = m.sender_id
+                JOIN room_sub_rooms sr ON sr.sub_room_id = m.sub_room_id
+                JOIN rooms r ON r.room_id = sr.room_id
+                WHERE m.is_private = 1 AND m.receiver_id = %s AND m.receiver_read = 0
+                ORDER BY m.message_id DESC LIMIT 1
+                """,
+                (self.current_user_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+        except Exception:
+            return
+        if not row or row["message_id"] <= self._last_dm_toast_id:
+            return
+        self._last_dm_toast_id = row["message_id"]
+        self._show_toast(row["full_name"] or row["username"], row["room_name"])
+
+    def _show_toast(self, student, room_name):
+        t = tk.Toplevel(self)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(bg=theme.DM_BADGE_BG)
+        tk.Label(t, text="New private message", font=theme.font(9, "bold"), fg="#e6d2ff",
+                 bg=theme.DM_BADGE_BG, anchor="w").pack(fill="x", padx=12, pady=(8, 0))
+        tk.Label(t, text=f"{student}  \u00b7  {room_name}", font=theme.font(11, "bold"),
+                 fg="white", bg=theme.DM_BADGE_BG, anchor="w").pack(fill="x", padx=12, pady=(0, 8))
+        x = self.winfo_rootx() + self.winfo_width() - 330
+        y = self.winfo_rooty() + 40
+        t.geometry(f"310x56+{x}+{y}")
+        t.after(5000, t.destroy)
 
     def _on_menu_tag(self, message_id, key):
         if key == "other":
@@ -1841,6 +1892,7 @@ class RoomFrame(tk.Toplevel):
                 self.refresh_messages()
             self.load_members()
             self.apply_permissions_to_input()
+            self.check_dm_preview()
             self.check_admin_alerts()
             self._polling_job = self.after(2500, tick)
 
