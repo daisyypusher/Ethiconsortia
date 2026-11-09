@@ -14,6 +14,7 @@ from db.connection import get_connection
 from ui import theme, emote_picker, image_message_handler as imh
 from ui.moderation_filter import (
     filter_message, record_warning, show_warning_dialog, is_banned, log_flagged,
+    find_suspicious, count_unread_alerts, get_admin_flagged, mark_alerts_read,
 )
 
 EMOTES = [
@@ -140,6 +141,7 @@ class RoomFrame(tk.Toplevel):
 
         sr_canvas = tk.Canvas(p, bg=theme.SUB_ROOM_BG, highlightthickness=0)
         sr_canvas.place(x=0, y=74, width=220, height=480)
+        self._sr_canvas = sr_canvas
         self.sub_rooms_list_panel = tk.Frame(sr_canvas, bg=theme.SUB_ROOM_BG)
         sr_canvas.create_window((0, 0), window=self.sub_rooms_list_panel, anchor="nw", width=220)
         self.sub_rooms_list_panel.bind(
@@ -177,8 +179,14 @@ class RoomFrame(tk.Toplevel):
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
             cur.execute(
-                "SELECT sub_room_id, sub_room_name, sub_room_type, sub_room_type_detail, "
-                "dm_user_a, dm_user_b FROM room_sub_rooms WHERE room_id=%s ORDER BY position ASC",
+                "SELECT s.sub_room_id, s.sub_room_name, s.sub_room_type, "
+                "s.sub_room_type_detail, s.dm_user_a, s.dm_user_b, "
+                "COALESCE(NULLIF(ua.full_name,''), ua.username) AS dm_a_name, "
+                "COALESCE(NULLIF(ub.full_name,''), ub.username) AS dm_b_name "
+                "FROM room_sub_rooms s "
+                "LEFT JOIN users ua ON ua.user_id = s.dm_user_a "
+                "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
+                "WHERE s.room_id=%s ORDER BY s.position ASC",
                 (self.room_id,),
             )
             rows = cur.fetchall()
@@ -192,12 +200,25 @@ class RoomFrame(tk.Toplevel):
                 detail = r["sub_room_type_detail"]
                 dm_a, dm_b = r["dm_user_a"], r["dm_user_b"]
                 is_private = detail == "private"
+                full_name = sr_name   # what the chat header shows
 
                 if is_private:
                     is_participant = dm_a == self.current_user_id or dm_b == self.current_user_id
                     is_admin = self.current_sys_role == "admin"
                     if not is_participant and not is_admin:
                         continue
+
+                    a_name = r["dm_a_name"] or "?"
+                    b_name = r["dm_b_name"] or "?"
+                    if is_participant:
+                        partner = b_name if dm_a == self.current_user_id else a_name
+                        full_name = f"DM-{partner}"
+                        sr_name = full_name
+                    else:
+                        full_name = f"DM-{a_name} \u2194 {b_name}"
+                        sr_name = f"DM-{a_name.split(' ')[0]} \u2194 {b_name.split(' ')[0]}"
+                    if len(sr_name) > 24:
+                        sr_name = sr_name[:23] + "\u2026"
 
                 section = "DM" if is_private else "PUBLIC"
                 if section != last_section:
@@ -214,16 +235,17 @@ class RoomFrame(tk.Toplevel):
                     dm_partner_id = dm_b if dm_a == self.current_user_id else dm_a
 
                 row_widget = self._build_sub_room_row(sr_id, sr_name, sr_type, is_private,
-                                                       dm_partner_id)
+                                                       dm_partner_id, full_name)
                 row_widget.pack(fill="x")
                 if first:
-                    self.select_sub_room(sr_id, sr_name, is_private, dm_partner_id)
+                    self.select_sub_room(sr_id, full_name, is_private, dm_partner_id)
                     first = False
 
         except Exception as ex:
             print(f"load_sub_rooms error: {ex}")
 
-    def _build_sub_room_row(self, ch_id, ch_name, ch_type, is_private, dm_partner_id):
+    def _build_sub_room_row(self, ch_id, ch_name, ch_type, is_private, dm_partner_id,
+                            full_name=None):
         row = tk.Frame(self.sub_rooms_list_panel, bg=theme.SUB_ROOM_BG, height=36, cursor="hand2")
         row.pack_propagate(False)
 
@@ -250,7 +272,7 @@ class RoomFrame(tk.Toplevel):
         refresh_style()
 
         def on_click(_e=None):
-            self.select_sub_room(ch_id, ch_name, is_private, dm_partner_id)
+            self.select_sub_room(ch_id, full_name or ch_name, is_private, dm_partner_id)
 
         for w in (row, icon_lbl, name_lbl):
             w.bind("<Button-1>", on_click)
@@ -354,12 +376,13 @@ class RoomFrame(tk.Toplevel):
             )
             existing = cur.fetchone()
 
+            import re
+            stripped = re.sub(r"\s*\(@.*?\)", "", partner_display).strip()
+
             if existing:
-                sr_id, sr_name = existing["sub_room_id"], existing["sub_room_name"]
+                sr_id = existing["sub_room_id"]
             else:
-                import re
-                stripped = re.sub(r"\s*\(@.*?\)", "", partner_display).strip()
-                sr_name = f"dm-{stripped}"
+                sr_name = f"DM-{dm_a}-{dm_b}"   # internal name only; the label is built on display
 
                 cur.execute(
                     "SELECT COALESCE(MAX(position)+1, 0) AS p FROM room_sub_rooms WHERE room_id=%s",
@@ -379,7 +402,7 @@ class RoomFrame(tk.Toplevel):
             cur.close()
 
             self.load_sub_rooms()
-            self.select_sub_room(sr_id, sr_name, True, partner_id)
+            self.select_sub_room(sr_id, f"DM-{stripped}", True, partner_id)
 
         except Exception as ex:
             messagebox.showerror("Error", f"Error opening DM: {ex}", parent=self)
@@ -395,7 +418,11 @@ class RoomFrame(tk.Toplevel):
         self.lbl_sub_room_header = tk.Label(hdr, text="# Select a sub-room",
                                              font=theme.font(15, "bold"), fg=theme.DARK_NAVY,
                                              bg="#d2deF5", anchor="w")
-        self.lbl_sub_room_header.place(x=14, y=12, width=570, height=24)
+        self.lbl_sub_room_header.place(x=14, y=12, width=420, height=24)
+
+        self.btn_alerts = tk.Button(hdr, text="", font=theme.font(10, "bold"), fg="white",
+                                     bg=theme.RED_ACCENT, relief="flat", bd=0, cursor="hand2",
+                                     command=lambda: self.open_flagged_messages_viewer(self))
 
         msg_canvas = tk.Canvas(p, bg=theme.CHAT_BG, highlightthickness=0)
         msg_scroll = tk.Scrollbar(p, orient="vertical", command=msg_canvas.yview)
@@ -406,9 +433,17 @@ class RoomFrame(tk.Toplevel):
         self.chat_messages_panel = tk.Frame(msg_canvas, bg=theme.CHAT_BG)
         self._chat_window = msg_canvas.create_window((0, 0), window=self.chat_messages_panel,
                                                        anchor="nw", width=584)
+        # scroll area is never shorter than the visible chat area -> no blank scrolling
         self.chat_messages_panel.bind(
-            "<Configure>", lambda e: msg_canvas.configure(scrollregion=msg_canvas.bbox("all")))
+            "<Configure>",
+            lambda e: msg_canvas.configure(
+                scrollregion=(0, 0, 584, max(e.height, msg_canvas.winfo_height()))))
         self._msg_canvas = msg_canvas
+
+        # mouse wheel (Windows/macOS use <MouseWheel>, Linux uses Button-4/5)
+        self.bind("<MouseWheel>", self._on_mousewheel, add="+")
+        self.bind("<Button-4>", self._on_mousewheel, add="+")
+        self.bind("<Button-5>", self._on_mousewheel, add="+")
 
         # Input bar
         input_bar = tk.Frame(p, bg=theme.INPUT_BG)
@@ -532,6 +567,7 @@ class RoomFrame(tk.Toplevel):
 
         canvas = tk.Canvas(p, bg=theme.RIGHT_BG, highlightthickness=0)
         canvas.place(x=0, y=42, width=265, height=580)
+        self._members_canvas = canvas
         self.members_list_panel = tk.Frame(canvas, bg=theme.RIGHT_BG)
         canvas.create_window((0, 0), window=self.members_list_panel, anchor="nw", width=265)
         self.members_list_panel.bind(
@@ -849,7 +885,41 @@ class RoomFrame(tk.Toplevel):
                                          tag_label=r["msg_tag_label"])
             bubble.pack(fill="x", pady=(0, 5))
 
-        self.after(50, lambda: self._msg_canvas.yview_moveto(top if keep_pos else 1.0))
+        self.after(50, lambda: self._scroll_chat(top if keep_pos else 1.0))
+
+    def _scroll_chat(self, fraction):
+        """Sizes the scroll area to the real message height, then scrolls.
+        fraction 1.0 = bottom, where the latest message is."""
+        try:
+            self.update_idletasks()
+            canvas = self._msg_canvas
+            h = max(self.chat_messages_panel.winfo_reqheight(), canvas.winfo_height())
+            canvas.configure(scrollregion=(0, 0, 584, h))
+            canvas.yview_moveto(fraction)
+        except tk.TclError:
+            pass
+
+    def _on_mousewheel(self, event):
+        """Scrolls whichever list the pointer is over: chat, sub-rooms or members."""
+        try:
+            w = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return
+        targets = (self._msg_canvas, self._sr_canvas, self._members_canvas)
+        while w is not None:
+            for canvas in targets:
+                if w is canvas:
+                    num = getattr(event, "num", None)
+                    if num == 4:
+                        step = -1
+                    elif num == 5:
+                        step = 1
+                    else:
+                        step = -1 if event.delta > 0 else 1
+                    canvas.yview_scroll(step * (2 if canvas is self._msg_canvas else 1),
+                                        "units")
+                    return
+            w = w.master
 
     def show_no_permission(self, msg):
         for w in self.chat_messages_panel.winfo_children():
@@ -1199,6 +1269,9 @@ class RoomFrame(tk.Toplevel):
             if label_flagged:
                 log_flagged(self.current_user_id, msg_id,
                             f"[tag label] {tag_label}", f"[tag label] {final_label}")
+            if find_suspicious(raw_content):
+                log_flagged(self.current_user_id, msg_id, raw_content, final_content,
+                            category="suspicious")
 
             self._reset_message_box()
             self.refresh_messages()
@@ -1469,12 +1542,40 @@ class RoomFrame(tk.Toplevel):
                  anchor="w").place(x=20, y=275, width=520, height=20)
 
         sr_canvas = tk.Canvas(dlg, bg="#1c2a55", highlightthickness=1,
-                               highlightbackground=theme.MEDIUM_BLUE)
-        sr_canvas.place(x=20, y=298, width=520, height=120)
+                               highlightbackground=theme.MEDIUM_BLUE, yscrollincrement=32)
+        sr_canvas.place(x=20, y=298, width=504, height=120)
+        sr_scroll = tk.Scrollbar(dlg, orient="vertical", command=sr_canvas.yview)
+        sr_canvas.configure(yscrollcommand=sr_scroll.set)
+        sr_scroll.place(x=524, y=298, width=16, height=120)
         sub_room_list_panel = tk.Frame(sr_canvas, bg="#1c2a55")
-        sr_canvas.create_window((0, 0), window=sub_room_list_panel, anchor="nw", width=520)
+        sr_canvas.create_window((0, 0), window=sub_room_list_panel, anchor="nw", width=502)
         sub_room_list_panel.bind(
-            "<Configure>", lambda e: sr_canvas.configure(scrollregion=sr_canvas.bbox("all")))
+            "<Configure>",
+            lambda e: sr_canvas.configure(
+                scrollregion=(0, 0, 502, max(e.height, sr_canvas.winfo_height()))))
+
+        # mouse wheel for this dialog's sub-room list (one notch = one row)
+        def on_wheel(event):
+            try:
+                w = dlg.winfo_containing(event.x_root, event.y_root)
+            except Exception:
+                return
+            while w is not None:
+                if w is sr_canvas:
+                    num = getattr(event, "num", None)
+                    if num == 4:
+                        step = -1
+                    elif num == 5:
+                        step = 1
+                    else:
+                        step = -1 if event.delta > 0 else 1
+                    sr_canvas.yview_scroll(step, "units")
+                    return
+                w = w.master
+
+        dlg.bind("<MouseWheel>", on_wheel)
+        dlg.bind("<Button-4>", on_wheel)
+        dlg.bind("<Button-5>", on_wheel)
 
         def refresh_list():
             for w in sub_room_list_panel.winfo_children():
@@ -1483,9 +1584,16 @@ class RoomFrame(tk.Toplevel):
                 conn = get_connection()
                 cur = conn.cursor(dictionary=True)
                 cur.execute(
-                    "SELECT sub_room_id, sub_room_name, sub_room_type, sub_room_type_detail "
-                    "FROM room_sub_rooms WHERE room_id=%s ORDER BY position ASC",
-                    (self.room_id,),
+                    "SELECT s.sub_room_id, s.sub_room_name, s.sub_room_type, "
+                    "s.sub_room_type_detail, "
+                    "COALESCE(NULLIF(ua.full_name,''), ua.username) AS dm_a_name, "
+                    "COALESCE(NULLIF(ub.full_name,''), ub.username) AS dm_b_name "
+                    "FROM room_sub_rooms s "
+                    "LEFT JOIN users ua ON ua.user_id = s.dm_user_a "
+                    "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
+                    "WHERE s.room_id=%s AND (s.sub_room_type_detail='public' OR %s) "
+                    "ORDER BY s.position ASC",
+                    (self.room_id, self.current_sys_role == "admin"),
                 )
                 rows = cur.fetchall()
                 cur.close()
@@ -1494,6 +1602,8 @@ class RoomFrame(tk.Toplevel):
                     sr_id, sr_name = r["sub_room_id"], r["sub_room_name"]
                     sr_type, detail = r["sub_room_type"], r["sub_room_type_detail"]
                     is_dm = detail == "private"
+                    if is_dm:
+                        sr_name = f"DM-{r['dm_a_name']} \u2194 {r['dm_b_name']}"
 
                     row_f = tk.Frame(sub_room_list_panel, bg="#1c2a55", height=32)
                     row_f.pack(fill="x")
@@ -1503,7 +1613,7 @@ class RoomFrame(tk.Toplevel):
                     tk.Label(row_f, text=icon, font=theme.font(12, emoji=True),
                              fg="#be82ff" if is_dm else theme.SOFT_BLUE,
                              bg="#1c2a55").place(x=8, y=6, width=20, height=20)
-                    tk.Label(row_f, text=sr_name + ("  [DM]" if is_dm else ""),
+                    tk.Label(row_f, text=sr_name,
                              font=theme.font(12), fg="#c8a0ff" if is_dm else "white",
                              bg="#1c2a55", anchor="w").place(x=32, y=7, width=420, height=18)
 
@@ -1527,7 +1637,7 @@ class RoomFrame(tk.Toplevel):
                         btn_del = tk.Button(row_f, text="\U0001F5D1", font=theme.font(11, emoji=True),
                                              fg="white", bg=theme.RED_ACCENT, relief="flat", bd=0,
                                              cursor="hand2", command=make_delete())
-                        btn_del.place(x=468, y=5, width=38, height=22)
+                        btn_del.place(x=456, y=5, width=38, height=22)
 
             except Exception as ex:
                 print(f"Settings sub-room list error: {ex}")
@@ -1613,37 +1723,36 @@ class RoomFrame(tk.Toplevel):
         dlg.grab_set()
         dlg.configure(bg="#19233c")
 
-        tk.Label(dlg, text="Flagged & Censored Messages  \u2014  visible to admins only",
+        tk.Label(dlg, text="Flagged & Suspicious Messages  \u2014  your departments only",
                  font=theme.font(13, "bold"), fg=theme.WARN_ORANGE, bg="#19233c",
                  anchor="w").place(x=14, y=12, width=670, height=22)
 
-        cols = ("User ID", "Sender", "Original Message", "Censored", "Time")
-        from tkinter import ttk
-        style = ttk.Style()
+        cols = ("Room", "Sub-room", "Sender", "Type", "Original Message", "Shown As", "Time")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=17)
-        for c, w in zip(cols, (60, 90, 200, 200, 130)):
+        for c, w in zip(cols, (70, 130, 70, 70, 100, 130, 98)):
             tree.heading(c, text=c)
             tree.column(c, width=w)
+        tree.tag_configure("unread", foreground=theme.RED_ACCENT)
         tree.place(x=14, y=44, width=668, height=410)
 
         try:
-            conn = get_connection()
-            cur = conn.cursor(dictionary=True)
-            cur.execute(
-                """
-                SELECT fm.user_id, u.username, fm.original, fm.censored, fm.flagged_at
-                FROM flagged_messages fm
-                JOIN users u ON fm.user_id = u.user_id
-                ORDER BY fm.flagged_at DESC
-                LIMIT 200
-                """
-            )
-            for r in cur.fetchall():
-                tree.insert("", tk.END, values=(
-                    r["user_id"], r["username"], r["original"], r["censored"],
+            rows = get_admin_flagged(self.current_user_id)
+            for r in rows:
+                suspicious = r["category"] == "suspicious"
+                tree.insert("", tk.END, tags=("unread",) if r["is_unread"] else (), values=(
+                    r["room_name"],
+                    (f"DM-{r['dm_a_name']} \u2194 {r['dm_b_name']}"
+                     if r["sub_room_type_detail"] == "private" else r["sub_room_name"]),
+                    r["username"],
+                    "Suspicious" if suspicious else "Filtered",
+                    r["original"],
+                    "(not censored)" if suspicious else r["censored"],
                     r["flagged_at"].strftime("%Y-%m-%d %H:%M"),
                 ))
-            cur.close()
+            # only now does it count as read, and only for this admin
+            mark_alerts_read(self.current_user_id,
+                             [r["id"] for r in rows if r["is_unread"]])
+            self.check_admin_alerts()
         except Exception as ex:
             messagebox.showerror("Error", str(ex), parent=dlg)
 
@@ -1732,6 +1841,7 @@ class RoomFrame(tk.Toplevel):
                 self.refresh_messages()
             self.load_members()
             self.apply_permissions_to_input()
+            self.check_admin_alerts()
             self._polling_job = self.after(2500, tick)
 
         self._polling_job = self.after(2500, tick)
@@ -1743,6 +1853,16 @@ class RoomFrame(tk.Toplevel):
             except Exception:
                 pass
             self._polling_job = None
+
+    def check_admin_alerts(self):
+        if self.current_sys_role != "admin":
+            return
+        n = count_unread_alerts(self.current_user_id)
+        if n:
+            self.btn_alerts.configure(text=f"\u26A0 {n} new alert(s)")
+            self.btn_alerts.place(x=445, y=10, width=140, height=28)
+        else:
+            self.btn_alerts.place_forget()
 
     # ═════════════════════════════════════════════════════════════════
     #  NAVIGATION
