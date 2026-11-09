@@ -43,6 +43,14 @@ class RoomLobbyFrame(tk.Tk):
                                         bold=False, command=self._logout)
         btn_logout.place(x=870, y=14, width=72, height=28)
 
+        self.btn_notify = None
+        if role == "professor":
+            self.btn_notify = theme.make_button(top_bar, "\u2709 Messages", "#28376e",
+                                                 font_size=10, bold=False, emoji=True,
+                                                 command=self._show_dm_previews)
+            self.btn_notify.place(x=735, y=14, width=125, height=28)
+            self._poll_notifications()
+
         # ── Left sidebar (room quick icons) ──
         self.sidebar = tk.Frame(main, bg=theme.DARKER_NAVY)
         self.sidebar.place(x=0, y=55, width=72, height=585)
@@ -585,6 +593,94 @@ class RoomLobbyFrame(tk.Tk):
 
         except Exception as ex:
             lbl_status.configure(text=f"DB Error: {ex}")
+
+    # ── Professor: new private message previews ──
+    def _count_unread_dms(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM room_messages WHERE is_private=1 "
+                    "AND receiver_id=%s AND receiver_read=0", (self.current_user_id,))
+        n = cur.fetchone()[0]
+        cur.close()
+        return n
+
+    def _poll_notifications(self):
+        try:
+            n = self._count_unread_dms()
+            self.btn_notify.configure(text=f"\u2709 Messages ({n})" if n else "\u2709 Messages",
+                                      bg=theme.RED_ACCENT if n else "#28376e")
+        except Exception as ex:
+            print(f"notify poll error: {ex}")
+        self.after(3000, self._poll_notifications)
+
+    def _show_dm_previews(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("New Private Messages")
+        dlg.geometry("460x360")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg=theme.ROOMS_BG)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="New private messages", font=theme.font(16, "bold"), fg="white",
+                 bg=theme.ROOMS_BG, anchor="w").place(x=20, y=15, width=420, height=26)
+
+        panel = tk.Frame(dlg, bg="#1c2a55", highlightthickness=1,
+                         highlightbackground=theme.MEDIUM_BLUE)
+        panel.place(x=20, y=55, width=420, height=250)
+
+        try:
+            conn = get_connection()
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                """
+                SELECT r.room_id, r.room_name, r.host_id, u.full_name, u.username,
+                       COUNT(*) AS n, MAX(m.sent_at) AS last_at,
+                       COALESCE(rm.room_role, 'member') AS room_role
+                FROM room_messages m
+                JOIN room_sub_rooms sr ON sr.sub_room_id = m.sub_room_id
+                JOIN rooms r ON r.room_id = sr.room_id
+                JOIN users u ON u.user_id = m.sender_id
+                LEFT JOIN room_members rm ON rm.room_id = r.room_id AND rm.user_id = %s
+                WHERE m.is_private = 1 AND m.receiver_id = %s AND m.receiver_read = 0
+                GROUP BY r.room_id, r.room_name, r.host_id, u.user_id, u.full_name,
+                         u.username, rm.room_role
+                ORDER BY last_at DESC
+                """,
+                (self.current_user_id, self.current_user_id),
+            )
+            rows = cur.fetchall()
+            cur.close()
+        except Exception as ex:
+            tk.Label(panel, text=f"DB Error: {ex}", fg=theme.RED_ACCENT, bg="#1c2a55",
+                     wraplength=390).pack(pady=20)
+            rows = []
+
+        if not rows:
+            tk.Label(panel, text="No new private messages.", font=theme.font(12, slant="italic"),
+                     fg="#78a0c8", bg="#1c2a55").pack(pady=90)
+
+        for r in rows:
+            row_f = tk.Frame(panel, bg="#1c2a55", height=48)
+            row_f.pack(fill="x")
+            row_f.pack_propagate(False)
+            who = r["full_name"] or r["username"]
+            tk.Label(row_f, text=who, font=theme.font(11, "bold"), fg="white", bg="#1c2a55",
+                     anchor="w").place(x=10, y=5, width=300, height=18)
+            tk.Label(row_f, text=f'{r["room_name"]}  \u00b7  {r["n"]} new', font=theme.font(10),
+                     fg=theme.SOFT_BLUE, bg="#1c2a55", anchor="w").place(x=10, y=24, width=300, height=16)
+
+            def make_open(rr=r):
+                def _open():
+                    dlg.destroy()
+                    self.enter_room(rr["room_id"], rr["room_name"], rr["room_role"], rr["host_id"])
+                return _open
+
+            tk.Button(row_f, text="Open", font=theme.font(10, "bold"), fg="white",
+                      bg=theme.MEDIUM_BLUE, relief="flat", bd=0, cursor="hand2",
+                      command=make_open()).place(x=340, y=10, width=68, height=26)
+
+        self._ghost_button(dlg, "Close", dlg.destroy).place(x=170, y=318, width=120, height=28)
 
     # ── Enter room ──
     def enter_room(self, room_id, room_name, room_role, host_id):
