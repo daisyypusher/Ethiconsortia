@@ -343,10 +343,11 @@ class RoomLobbyFrame(tk.Tk):
 
             sub_rooms = [("General", "text", 0), ("Announcements", "announcement", 1)]
             for sr_name, sr_type, pos in sub_rooms:
+                is_ann = sr_type == "announcement"
                 cur.execute(
-                    "INSERT INTO room_sub_rooms (room_id, sub_room_name, sub_room_type, position) "
-                    "VALUES (%s, %s, %s, %s)",
-                    (room_id, sr_name, sr_type, pos),
+                    "INSERT INTO room_sub_rooms (room_id, sub_room_name, sub_room_type, position, "
+                    "everyone_send, everyone_upload) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (room_id, sr_name, sr_type, pos, 0 if is_ann else 1, 0 if is_ann else 1),
                 )
 
             dlg.destroy()
