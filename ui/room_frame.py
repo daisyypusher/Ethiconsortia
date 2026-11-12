@@ -47,8 +47,7 @@ TAG_COLORS = {
     "other":        "#6482b4",
 }
 
-RESTRICTED_MSG = "Messaging is restricted in this room."
-ANNOUNCE_RESTRICTED_MSG = "Only host, admins and moderators can post."
+RESTRICTED_MSG = "You can't send messages in this sub-room."
 
 class RoomFrame(tk.Toplevel):
     def __init__(self, user_id, username, full_name, sys_role,
@@ -210,6 +209,7 @@ class RoomFrame(tk.Toplevel):
 
             first = True
             last_section = ""
+            readable = self._readable_sub_room_ids()
 
             for r in rows:
                 sr_id, sr_name, sr_type = r["sub_room_id"], r["sub_room_name"], r["sub_room_type"]
@@ -217,6 +217,8 @@ class RoomFrame(tk.Toplevel):
                 dm_a, dm_b = r["dm_user_a"], r["dm_user_b"]
                 is_private = detail == "private"
                 full_name = sr_name   # what the chat header shows
+                if not is_private and readable is not None and sr_id not in readable:
+                    continue
 
                 if is_private:
                     is_participant = dm_a == self.current_user_id or dm_b == self.current_user_id
@@ -594,7 +596,7 @@ class RoomFrame(tk.Toplevel):
         if self.selected_sub_room_id == -1:
             messagebox.showinfo("Info", "Please select a sub-room first.", parent=self)
             return
-        if not self._check_can_post():
+        if not self._check_can_post(upload=True):
             return
         path = imh.choose_attachment(self)
         if not path:
@@ -654,7 +656,11 @@ class RoomFrame(tk.Toplevel):
             cur.execute(
                 """
                 SELECT u.user_id, u.full_name, u.username,
-                                              u.role AS sys_role, rm.room_role, rm.can_post_announcements,
+                       u.role AS sys_role, rm.room_role,
+                       (SELECT GROUP_CONCAT(rr.role_name ORDER BY rr.role_name SEPARATOR ', ')
+                          FROM room_member_roles mr
+                          JOIN room_roles rr ON rr.role_id = mr.role_id
+                         WHERE mr.user_id = u.user_id AND mr.room_id = %s) AS role_names,
                        COALESCE(uw.is_banned, 0) AS is_banned
                 FROM room_members rm
                 JOIN users u ON rm.user_id = u.user_id
@@ -665,7 +671,7 @@ class RoomFrame(tk.Toplevel):
                     FIELD(u.role,'admin','professor','student'),
                     u.full_name ASC
                 """,
-                (self.room_id,),
+                (self.room_id, self.room_id),
             )
             rows = cur.fetchall()
             cur.close()
@@ -699,13 +705,13 @@ class RoomFrame(tk.Toplevel):
 
             self._build_member_row(r["user_id"], r["full_name"], r["username"],
                                     sys_role, member_role, is_banned_u,
-                                    r["can_post_announcements"] == 1).pack(fill="x")
+                                    r["role_names"]).pack(fill="x")
 
     def _build_section_header(self, text):
         return tk.Label(self.members_list_panel, text=text, font=theme.font(10, "bold"),
                          fg="#6482b4", bg=theme.RIGHT_BG, anchor="center", pady=6)
 
-    def _build_member_row(self, uid, fn, un, sys_role, member_role, is_banned_u, is_mod=False):
+    def _build_member_row(self, uid, fn, un, sys_role, member_role, is_banned_u, role_names=None):
         row = tk.Frame(self.members_list_panel, bg=(
             "#d2e1f5" if uid == self.current_user_id else theme.RIGHT_BG), height=40)
         row.pack_propagate(False)
@@ -729,8 +735,8 @@ class RoomFrame(tk.Toplevel):
                  anchor="w").place(x=50, y=6, width=160, height=15)
 
         sub = f"HOST \u00b7 {theme.role_label(sys_role)}" if member_role == "host" else theme.role_label(sys_role)
-        if is_mod and member_role != "host" and sys_role != "admin":
-            sub += "  \u00b7  MODERATOR"
+        if role_names and member_role != "host":
+            sub += "  \u00b7  " + role_names[:20]
         tk.Label(row, text=sub, font=theme.font(9), fg=(theme.RED_ACCENT if member_role == "host"
                  else "#6482b4"), bg=row["bg"], anchor="w").place(x=50, y=22, width=160, height=13)
 
@@ -916,7 +922,7 @@ class RoomFrame(tk.Toplevel):
             return
 
         if not self.selected_is_private and self.current_sys_role != "admin":
-            if not self.get_permission("can_read_history"):
+            if not self.channel_perms(self.selected_sub_room_id)[0]:
                 if self._last_msg_sig != "no-permission":
                     self.show_no_permission(
                         "\U0001F512  You don't have permission to read messages here.")
@@ -1583,44 +1589,97 @@ class RoomFrame(tk.Toplevel):
             txt.insert(tk.END, f"Error loading history: {ex}")
         txt.configure(state="disabled")
 
-    def can_post_announcements(self):
-        """Admins and the host always can; members only if made a Moderator."""
+    def _check_can_post(self, upload=False):
+        """Warns and returns False if the user can't send (or upload) in the selected sub-room."""
+        if self.selected_is_private or self.current_sys_role == "admin":
+            return True
+        _r, can_send, can_upload = self.channel_perms(self.selected_sub_room_id)
+        if upload:
+            if can_upload:
+                return True
+            msg = "You don't have permission to upload files in this sub-room."
+        else:
+            if can_send:
+                return True
+            msg = "You don't have permission to send messages in this sub-room."
+        messagebox.showwarning("Permission Denied", msg, parent=self)
+        return False
+
+    def _is_host_or_admin(self):
         if self.current_sys_role == "admin":
             return True
         try:
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute(
-                "SELECT room_role, can_post_announcements FROM room_members "
-                "WHERE room_id=%s AND user_id=%s",
-                (self.room_id, self.current_user_id),
-            )
+            cur.execute("SELECT room_role FROM room_members WHERE room_id=%s AND user_id=%s",
+                        (self.room_id, self.current_user_id))
             row = cur.fetchone()
             cur.close()
-            if row:
-                return row[0] == "host" or row[1] == 1
-        except Exception as ex:
-            print(f"can_post_announcements error: {ex}")
-        return False
+            return bool(row and row[0] == "host")
+        except Exception:
+            return False
 
-    def _check_can_post(self):
-        """Shows a warning and returns False if the user can't post in the selected sub-room."""
-        if self.selected_is_private or self.current_sys_role == "admin":
-            return True
-        if self.selected_sub_room_type == "announcement":
-            if self.can_post_announcements():
-                return True
-            messagebox.showwarning(
-                "Permission Denied",
-                "Only the host, admins and moderators can post in an announcement sub-room.",
-                parent=self)
-            return False
-        if not self.get_permission("can_send_messages"):
-            messagebox.showwarning(
-                "Permission Denied",
-                "You don't have permission to send messages in this room.", parent=self)
-            return False
-        return True
+    def channel_perms(self, sub_room_id):
+        """(can_read, can_send, can_upload) for the current user in a public sub-room.
+        Admins and the host always have everything. Everyone else gets 'Everyone' plus all
+        their roles combined, limited by their personal Can Read History / Can Send
+        Messages switches in Room Settings."""
+        if self.current_sys_role == "admin":
+            return True, True, True
+        try:
+            conn = get_connection()
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                "SELECT room_role, can_send_messages, can_read_history FROM room_members "
+                "WHERE room_id=%s AND user_id=%s", (self.room_id, self.current_user_id))
+            me = cur.fetchone()
+            if not me:
+                cur.close()
+                return False, False, False
+            if me["room_role"] == "host":
+                cur.close()
+                return True, True, True
+            cur.execute(
+                "SELECT everyone_read, everyone_send, everyone_upload FROM room_sub_rooms "
+                "WHERE sub_room_id=%s", (sub_room_id,))
+            ev = cur.fetchone()
+            cur.execute(
+                "SELECT COALESCE(MAX(p.can_read),0) AS r, COALESCE(MAX(p.can_send),0) AS s, "
+                "COALESCE(MAX(p.can_upload),0) AS u "
+                "FROM sub_room_role_perms p JOIN room_member_roles mr ON mr.role_id = p.role_id "
+                "WHERE p.sub_room_id=%s AND mr.user_id=%s", (sub_room_id, self.current_user_id))
+            rl = cur.fetchone()
+            cur.close()
+        except Exception as ex:
+            print(f"channel_perms error: {ex}")
+            return False, False, False
+        if not ev:
+            return False, False, False
+        can_read = (ev["everyone_read"] == 1 or rl["r"] == 1) and me["can_read_history"] == 1
+        can_send = (ev["everyone_send"] == 1 or rl["s"] == 1) and me["can_send_messages"] == 1
+        can_upload = (ev["everyone_upload"] == 1 or rl["u"] == 1) and me["can_send_messages"] == 1
+        return bool(can_read), bool(can_send), bool(can_upload)
+
+    def _readable_sub_room_ids(self):
+        """None = everything (admin / host). Otherwise the public sub-room ids this user can read."""
+        if self._is_host_or_admin():
+            return None
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT s.sub_room_id FROM room_sub_rooms s "
+                "WHERE s.room_id=%s AND s.sub_room_type_detail='public' AND (s.everyone_read=1 "
+                "OR EXISTS (SELECT 1 FROM sub_room_role_perms p "
+                "JOIN room_member_roles mr ON mr.role_id = p.role_id "
+                "WHERE p.sub_room_id = s.sub_room_id AND p.can_read = 1 AND mr.user_id = %s))",
+                (self.room_id, self.current_user_id))
+            ids = {r[0] for r in cur.fetchall()}
+            cur.close()
+            return ids
+        except Exception:
+            return None
+        
     # ═════════════════════════════════════════════════════════════════
     #  PERMISSIONS
     # ═════════════════════════════════════════════════════════════════
@@ -1646,24 +1705,23 @@ class RoomFrame(tk.Toplevel):
         return True
 
     def apply_permissions_to_input(self):
-        if self.selected_is_private or self.current_sys_role == "admin":
-            allowed, reason = True, ""
-        elif self.selected_sub_room_type == "announcement":
-            allowed, reason = self.can_post_announcements(), ANNOUNCE_RESTRICTED_MSG
+        if (self.selected_is_private or self.current_sys_role == "admin"
+                or self.selected_sub_room_id == -1):
+            allowed = True
         else:
-            allowed, reason = self.get_permission("can_send_messages"), RESTRICTED_MSG
+            allowed = self.channel_perms(self.selected_sub_room_id)[1]
 
         self.btn_send.configure(state="normal" if allowed else "disabled")
         self.txt_message.configure(state="normal")
         if allowed:
-            if self.txt_message.get() in (RESTRICTED_MSG, ANNOUNCE_RESTRICTED_MSG):
+            if self.txt_message.get() == RESTRICTED_MSG:
                 self.txt_message.delete(0, tk.END)
                 self.txt_message.insert(0, "Type a message...")
                 self.txt_message.configure(fg="gray")
         else:
-            if self.txt_message.get() != reason:
+            if self.txt_message.get() != RESTRICTED_MSG:
                 self.txt_message.delete(0, tk.END)
-                self.txt_message.insert(0, reason)
+                self.txt_message.insert(0, RESTRICTED_MSG)
             self.txt_message.configure(fg="#a05050", state="disabled")
 
     # ═════════════════════════════════════════════════════════════════
@@ -1691,6 +1749,10 @@ class RoomFrame(tk.Toplevel):
 
         tk.Label(dlg, text="Member Permissions", font=theme.font(13, "bold"), fg="white",
                  bg="#233260", anchor="w").place(x=20, y=118, width=520, height=20)
+
+        theme.make_button(dlg, "\U0001F3AD  Manage Roles", theme.DM_BADGE_BG, font_size=10,
+                          emoji=True, command=lambda: self.open_roles_dialog(dlg)
+                          ).place(x=380, y=114, width=160, height=26)
 
         perm_data = {}   # listbox text -> DB row
         lb_members = tk.Listbox(dlg, bg="#1c2a55", fg="white", font=theme.font(11),
@@ -1732,8 +1794,8 @@ class RoomFrame(tk.Toplevel):
         cb_read.place(x=285, y=190, width=240, height=22)
         cb_manage = self._perm_check(dlg, "Can Manage Members", False)
         cb_manage.place(x=285, y=212, width=240, height=22)
-        cb_mod = self._perm_check(dlg, "Moderator (post in announcements)", False)
-        cb_mod.place(x=285, y=234, width=250, height=22)
+
+
 
         def on_pick(_e=None):
             sel = lb_members.curselection()
@@ -1745,7 +1807,7 @@ class RoomFrame(tk.Toplevel):
             cb_send.var.set(r["can_send_messages"] == 1)
             cb_read.var.set(r["can_read_history"] == 1)
             cb_manage.var.set(r["can_manage_members"] == 1)
-            cb_mod.var.set(r["can_post_announcements"] == 1)
+            
 
         lb_members.bind("<<ListboxSelect>>", on_pick)
 
@@ -1851,6 +1913,13 @@ class RoomFrame(tk.Toplevel):
                                              fg="white", bg=theme.RED_ACCENT, relief="flat", bd=0,
                                              cursor="hand2", command=make_delete())
                         btn_del.place(x=456, y=5, width=38, height=22)
+                        btn_perm = tk.Button(
+                            row_f, text="\U0001F511", font=theme.font(11, emoji=True),
+                            fg="white", bg=theme.MEDIUM_BLUE, relief="flat", bd=0,
+                            cursor="hand2",
+                            command=lambda i=sr_id, n=sr_name:
+                                self.open_channel_perms_dialog(i, n, dlg))
+                        btn_perm.place(x=412, y=5, width=38, height=22)
 
             except Exception as ex:
                 print(f"Settings sub-room list error: {ex}")
@@ -1867,10 +1936,12 @@ class RoomFrame(tk.Toplevel):
             sr_name = re.sub(r"[^a-z0-9\-]", "-", tf_new.get().strip().lower())
             if not sr_name:
                 return
-            self.add_sub_room(sr_name)
+            new_id = self.add_sub_room(sr_name)
             tf_new.delete(0, tk.END)
             self.load_sub_rooms()
             refresh_list()
+            if new_id:
+                self.open_channel_perms_dialog(new_id, sr_name, dlg)
 
         btn_add = theme.make_button(dlg, "+ Add Sub-Room", theme.MEDIUM_BLUE, font_size=11,
                                      command=do_add)
@@ -1912,10 +1983,9 @@ class RoomFrame(tk.Toplevel):
             label = lb_members.get(sel[0])
             r = perm_data[label]
             s, rd, m = bool(cb_send.var.get()), bool(cb_read.var.get()), bool(cb_manage.var.get())
-            mod = bool(cb_mod.var.get())
-            self.save_member_perms(r["user_id"], s, rd, m, mod)
+            self.save_member_perms(r["user_id"], s, rd, m)
             r["can_send_messages"], r["can_read_history"], r["can_manage_members"] = int(s), int(rd), int(m)
-            r["can_post_announcements"] = int(mod)
+            
             save_status.configure(fg="#50d250", text=f"\u2713 Saved for {label[:30]}")
 
         btn_save = theme.make_button(dlg, "Save Permissions", theme.MEDIUM_BLUE, font_size=13,
@@ -1997,6 +2067,350 @@ class RoomFrame(tk.Toplevel):
     # ═════════════════════════════════════════════════════════════════
     #  FILTERED WORDS (professor / admin)
     # ═════════════════════════════════════════════════════════════════
+    def open_roles_dialog(self, parent_dlg):
+        if not self._is_host_or_admin():
+            return
+        bg = theme.SUB_ROOM_BG
+        dlg = tk.Toplevel(parent_dlg)
+        dlg.title("Manage Roles")
+        dlg.geometry("560x450")
+        dlg.transient(parent_dlg)
+        dlg.grab_set()
+        dlg.configure(bg=bg)
+        dlg.resizable(False, False)
+
+        def close():
+            dlg.destroy()
+            try:
+                parent_dlg.grab_set()
+            except tk.TclError:
+                pass
+        dlg.protocol("WM_DELETE_WINDOW", close)
+
+        tk.Label(dlg, text="Custom Roles", font=theme.font(14, "bold"), fg="white",
+                 bg=bg, anchor="w").place(x=20, y=14, width=520, height=24)
+        tk.Label(dlg, text="Create a role and give it to members. Then use the key button "
+                           "next to a sub-room in Room Settings to choose what each role can "
+                           "read, send and upload there.",
+                 font=theme.font(10, slant="italic"), fg=theme.SOFT_BLUE, bg=bg, anchor="w",
+                 wraplength=520, justify="left").place(x=20, y=40, width=520, height=32)
+        tk.Label(dlg, text="ROLES", font=theme.font(10, "bold"), fg="#8ca5d2", bg=bg,
+                 anchor="w").place(x=20, y=80, width=240, height=16)
+        tk.Label(dlg, text="MEMBERS  (double-click to give / remove)", font=theme.font(10, "bold"),
+                 fg="#8ca5d2", bg=bg, anchor="w").place(x=280, y=80, width=260, height=16)
+
+        lb_kw = dict(bg="#1c2a55", fg="white", font=theme.font(12),
+                     selectbackground=theme.MEDIUM_BLUE, exportselection=False,
+                     highlightthickness=1, highlightbackground=theme.MEDIUM_BLUE)
+        lb_roles = tk.Listbox(dlg, **lb_kw)
+        lb_roles.place(x=20, y=100, width=240, height=230)
+        lb_people = tk.Listbox(dlg, **lb_kw)
+        lb_people.place(x=280, y=100, width=260, height=230)
+
+        status = tk.Label(dlg, text="", font=theme.font(10), bg=bg, anchor="center")
+        status.place(x=20, y=338, width=520, height=18)
+        tf_name = tk.Entry(dlg, font=theme.font(12), bg="white", fg=theme.DARK_NAVY,
+                           relief="solid", bd=1, highlightthickness=1,
+                           highlightbackground=theme.SOFT_BLUE)
+        tf_name.place(x=20, y=364, width=240, height=30)
+
+        roles = []     # (role_id, name)
+        people = []    # (user_id, has_role)
+
+        def say(msg, ok=False):
+            status.configure(fg="#50d250" if ok else "#ff8080", text=msg)
+
+        def selected_role():
+            sel = lb_roles.curselection()
+            return roles[sel[0]] if sel else None
+
+        def load_people():
+            lb_people.delete(0, tk.END)
+            people.clear()
+            role = selected_role()
+            try:
+                conn = get_connection()
+                cur = conn.cursor(dictionary=True)
+                cur.execute(
+                    "SELECT u.user_id, u.full_name, u.username, "
+                    "EXISTS(SELECT 1 FROM room_member_roles mr "
+                    "       WHERE mr.role_id=%s AND mr.user_id=u.user_id) AS has_role "
+                    "FROM room_members rm JOIN users u ON u.user_id = rm.user_id "
+                    "WHERE rm.room_id=%s AND rm.room_role != 'host' AND u.role != 'admin' "
+                    "ORDER BY u.full_name ASC",
+                    (role[0] if role else 0, self.room_id))
+                for r in cur.fetchall():
+                    has = r["has_role"] == 1
+                    lb_people.insert(tk.END, ("\u2713  " if has else "     ") +
+                                     f'{r["full_name"] or r["username"]} (@{r["username"]})')
+                    people.append((r["user_id"], has))
+                cur.close()
+            except Exception as ex:
+                say(f"Error: {ex}")
+
+        def load_roles(select_id=None):
+            lb_roles.delete(0, tk.END)
+            roles.clear()
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT role_id, role_name FROM room_roles WHERE room_id=%s "
+                            "ORDER BY role_name ASC", (self.room_id,))
+                for rid, name in cur.fetchall():
+                    roles.append((rid, name))
+                    lb_roles.insert(tk.END, name)
+                    if rid == select_id:
+                        lb_roles.selection_set(tk.END)
+                cur.close()
+            except Exception as ex:
+                say(f"Error: {ex}")
+            load_people()
+
+        def toggle_person(e):
+            role = selected_role()
+            if not role:
+                say("Select a role first.")
+                return
+            idx = lb_people.nearest(e.y)
+            if not (0 <= idx < len(people)):
+                return
+            uid, has = people[idx]
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                if has:
+                    cur.execute("DELETE FROM room_member_roles WHERE role_id=%s AND user_id=%s",
+                                (role[0], uid))
+                else:
+                    cur.execute("INSERT IGNORE INTO room_member_roles (room_id, user_id, role_id) "
+                                "VALUES (%s,%s,%s)", (self.room_id, uid, role[0]))
+                cur.close()
+            except Exception as ex:
+                say(f"Error: {ex}")
+                return
+            load_people()
+            lb_people.selection_set(idx)
+            say("")
+
+        def do_create():
+            name = tf_name.get().strip()
+            if not name:
+                say("Type a role name first.")
+                return
+            if len(name) > 30:
+                say("Role name can be at most 30 characters.")
+                return
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("INSERT INTO room_roles (room_id, role_name) VALUES (%s,%s)",
+                            (self.room_id, name))
+                new_id = cur.lastrowid
+                cur.close()
+            except Exception as ex:
+                say("A role with that name already exists." if getattr(ex, "errno", None) == 1062
+                    else f"Error: {ex}")
+                return
+            tf_name.delete(0, tk.END)
+            load_roles(new_id)
+            say("\u2713 Role created.", ok=True)
+
+        def do_rename():
+            role = selected_role()
+            name = tf_name.get().strip()
+            if not role or not name:
+                say("Select a role and type its new name.")
+                return
+            if len(name) > 30:
+                say("Role name can be at most 30 characters.")
+                return
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("UPDATE room_roles SET role_name=%s WHERE role_id=%s AND room_id=%s",
+                            (name, role[0], self.room_id))
+                cur.close()
+            except Exception as ex:
+                say("A role with that name already exists." if getattr(ex, "errno", None) == 1062
+                    else f"Error: {ex}")
+                return
+            tf_name.delete(0, tk.END)
+            load_roles(role[0])
+            say("\u2713 Role renamed.", ok=True)
+
+        def do_delete():
+            role = selected_role()
+            if not role:
+                say("Select a role first.")
+                return
+            if not messagebox.askyesno(
+                    "Delete Role",
+                    f'Delete "{role[1]}"? Members lose it and its sub-room permissions.',
+                    parent=dlg):
+                return
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("DELETE FROM room_roles WHERE role_id=%s AND room_id=%s",
+                            (role[0], self.room_id))
+                cur.close()
+            except Exception as ex:
+                say(f"Error: {ex}")
+                return
+            load_roles()
+            say("\u2713 Role deleted.", ok=True)
+
+        lb_roles.bind("<<ListboxSelect>>", lambda e: load_people())
+        lb_people.bind("<Double-Button-1>", toggle_person)
+        tf_name.bind("<Return>", lambda e: do_create())
+
+        theme.make_button(dlg, "Create", theme.MEDIUM_BLUE, font_size=11,
+                          command=do_create).place(x=20, y=402, width=76, height=30)
+        theme.make_button(dlg, "Rename", "#28376e", font_size=11,
+                          command=do_rename).place(x=102, y=402, width=76, height=30)
+        theme.make_button(dlg, "Delete", theme.RED_ACCENT, font_size=11,
+                          command=do_delete).place(x=184, y=402, width=76, height=30)
+        theme.make_button(dlg, "Close", "#28376e", font_size=11,
+                          command=close).place(x=420, y=402, width=120, height=30)
+
+        load_roles()
+
+    def open_channel_perms_dialog(self, sr_id, sr_name, parent_dlg):
+        if not self._is_host_or_admin():
+            return
+        bg = theme.SUB_ROOM_BG
+        dlg = tk.Toplevel(parent_dlg)
+        dlg.title(f"Permissions \u2014 {sr_name}")
+        dlg.geometry("520x440")
+        dlg.transient(parent_dlg)
+        dlg.grab_set()
+        dlg.configure(bg=bg)
+        dlg.resizable(False, False)
+
+        def close():
+            dlg.destroy()
+            try:
+                parent_dlg.grab_set()
+            except tk.TclError:
+                pass
+        dlg.protocol("WM_DELETE_WINDOW", close)
+
+        tk.Label(dlg, text=f"Who can use  \u25B8 {sr_name}", font=theme.font(14, "bold"),
+                 fg="white", bg=bg, anchor="w").place(x=20, y=14, width=480, height=24)
+        tk.Label(dlg, text="A member gets everything allowed for Everyone plus everything "
+                           "allowed for each of their roles. The host and administrators "
+                           "always have full access.",
+                 font=theme.font(10, slant="italic"), fg=theme.SOFT_BLUE, bg=bg, anchor="w",
+                 wraplength=480, justify="left").place(x=20, y=40, width=480, height=32)
+
+        for i, head in enumerate(("Read", "Send", "Upload")):
+            tk.Label(dlg, text=head, font=theme.font(9, "bold"), fg="#8ca5d2", bg=bg,
+                     anchor="center").place(x=272 + i * 68, y=76, width=50, height=16)
+
+        canvas = tk.Canvas(dlg, bg="#1c2a55", highlightthickness=1,
+                           highlightbackground=theme.MEDIUM_BLUE)
+        canvas.place(x=20, y=96, width=464, height=250)
+        sb = tk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        sb.place(x=484, y=96, width=16, height=250)
+        canvas.configure(yscrollcommand=sb.set)
+        panel = tk.Frame(canvas, bg="#1c2a55")
+        canvas.create_window((0, 0), window=panel, anchor="nw", width=462)
+        panel.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        entries = []   # (role_id or None for Everyone, read, send, upload)
+
+        def add_row(role_id, label, r, s, u, bold=False):
+            f = tk.Frame(panel, bg="#1c2a55", height=34)
+            f.pack(fill="x")
+            f.pack_propagate(False)
+            shown = label if len(label) <= 26 else label[:25] + "\u2026"
+            tk.Label(f, text=shown, font=theme.font(11, "bold" if bold else "normal"),
+                     fg="white", bg="#1c2a55", anchor="w").place(x=10, y=7, width=240, height=20)
+            v_r, v_s, v_u = (tk.BooleanVar(value=bool(x)) for x in (r, s, u))
+
+            def on_read():
+                if not v_r.get():
+                    v_s.set(False)
+                    v_u.set(False)
+
+            def on_write():
+                if v_s.get() or v_u.get():
+                    v_r.set(True)
+
+            for i, (v, cmd) in enumerate(((v_r, on_read), (v_s, on_write), (v_u, on_write))):
+                tk.Checkbutton(f, variable=v, command=cmd, bg="#1c2a55", fg="white",
+                               selectcolor="#1c2a55", activebackground="#1c2a55",
+                               activeforeground="white").place(x=262 + i * 68, y=5,
+                                                                width=30, height=24)
+            entries.append((role_id, v_r, v_s, v_u))
+
+        try:
+            conn = get_connection()
+            cur = conn.cursor(dictionary=True)
+            cur.execute("SELECT everyone_read, everyone_send, everyone_upload "
+                        "FROM room_sub_rooms WHERE sub_room_id=%s AND room_id=%s",
+                        (sr_id, self.room_id))
+            ev = cur.fetchone()
+            cur.execute(
+                "SELECT r.role_id, r.role_name, COALESCE(p.can_read,0) AS cr, "
+                "COALESCE(p.can_send,0) AS cs, COALESCE(p.can_upload,0) AS cu "
+                "FROM room_roles r LEFT JOIN sub_room_role_perms p "
+                "ON p.role_id = r.role_id AND p.sub_room_id = %s "
+                "WHERE r.room_id = %s ORDER BY r.role_name ASC", (sr_id, self.room_id))
+            role_rows = cur.fetchall()
+            cur.close()
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex), parent=dlg)
+            close()
+            return
+        if not ev:
+            close()
+            return
+
+        add_row(None, "Everyone (all members)", ev["everyone_read"], ev["everyone_send"],
+                ev["everyone_upload"], bold=True)
+        for r in role_rows:
+            add_row(r["role_id"], r["role_name"], r["cr"], r["cs"], r["cu"])
+        if not role_rows:
+            tk.Label(panel, text='No custom roles yet. Create one with "Manage Roles".',
+                     font=theme.font(10, slant="italic"), fg="#78a0c8",
+                     bg="#1c2a55").pack(pady=14)
+
+        status = tk.Label(dlg, text="", font=theme.font(10, "bold"), bg=bg, anchor="center")
+        status.place(x=20, y=352, width=480, height=18)
+
+        def do_save():
+            if not self._is_host_or_admin():
+                return
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                for role_id, v_r, v_s, v_u in entries:
+                    r_, s_, u_ = int(v_r.get()), int(v_s.get()), int(v_u.get())
+                    if role_id is None:
+                        cur.execute(
+                            "UPDATE room_sub_rooms SET everyone_read=%s, everyone_send=%s, "
+                            "everyone_upload=%s WHERE sub_room_id=%s AND room_id=%s",
+                            (r_, s_, u_, sr_id, self.room_id))
+                    else:
+                        cur.execute(
+                            "INSERT INTO sub_room_role_perms "
+                            "(sub_room_id, role_id, can_read, can_send, can_upload) "
+                            "VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "can_read=VALUES(can_read), can_send=VALUES(can_send), "
+                            "can_upload=VALUES(can_upload)", (sr_id, role_id, r_, s_, u_))
+                cur.close()
+            except Exception as ex:
+                status.configure(fg="#ff8080", text=f"Error: {ex}")
+                return
+            status.configure(fg="#50d250", text="\u2713 Saved")
+            dlg.after(700, close)
+
+        theme.make_button(dlg, "Save", theme.MEDIUM_BLUE, font_size=12,
+                          command=do_save).place(x=110, y=382, width=130, height=36)
+        theme.make_button(dlg, "Cancel", "#28376e", font_size=12,
+                          command=close).place(x=280, y=382, width=130, height=36)
+
     def open_filtered_words_dialog(self):
         if self.current_sys_role not in ("professor", "admin"):
             return
@@ -2116,6 +2530,7 @@ class RoomFrame(tk.Toplevel):
     #  SUB-ROOM CRUD
     # ═════════════════════════════════════════════════════════════════
     def add_sub_room(self, sr_name):
+        """Returns the new sub-room's id, or None on error."""
         try:
             conn = get_connection()
             cur = conn.cursor()
@@ -2129,9 +2544,12 @@ class RoomFrame(tk.Toplevel):
                 "sub_room_type_detail, position) VALUES (%s,%s,'text','public',%s)",
                 (self.room_id, sr_name, pos),
             )
+            new_id = cur.lastrowid
             cur.close()
+            return new_id
         except Exception as ex:
             messagebox.showerror("Error", f"Error adding sub-room: {ex}", parent=self)
+            return None
 
     def delete_sub_room(self, sr_id):
         try:
