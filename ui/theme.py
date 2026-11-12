@@ -179,3 +179,12 @@ def role_emoji(role):
 
 def role_color(role):
     return {"professor": "#1e82b4", "admin": "#961e1e"}.get(role, "#3c783c")
+
+def fmt_time(dt):
+    """12-hour time without a leading zero, e.g. 1:00 PM."""
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def fmt_datetime(dt):
+    """e.g. 2026-11-12 1:00 PM"""
+    return f"{dt.strftime('%Y-%m-%d')} {fmt_time(dt)}"
