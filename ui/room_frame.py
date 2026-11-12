@@ -52,7 +52,8 @@ ANNOUNCE_RESTRICTED_MSG = "Only host, admins and moderators can post."
 
 class RoomFrame(tk.Toplevel):
     def __init__(self, user_id, username, full_name, sys_role,
-                 room_id, room_name, room_role, host_id, parent_lobby):
+                 room_id, room_name, room_role, host_id, parent_lobby,
+                 open_sub_room_id=None):
         super().__init__(parent_lobby)
         self.current_user_id = user_id
         self.current_username = username
@@ -96,6 +97,8 @@ class RoomFrame(tk.Toplevel):
         members_side.place(x=880, y=0, width=270, height=750)
 
         self.load_sub_rooms()
+        if open_sub_room_id is not None:
+            self.open_sub_room(open_sub_room_id)
         self.load_members()
         self.start_polling()
 
@@ -324,6 +327,44 @@ class RoomFrame(tk.Toplevel):
         for w in self.sub_rooms_list_panel.winfo_children():
             if hasattr(w, "_refresh_style"):
                 w._refresh_style()
+
+    def open_sub_room(self, sr_id):
+        """Jumps straight to one sub-room (used by notification Open buttons).
+        select_sub_room scrolls to the newest message."""
+        try:
+            conn = get_connection()
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                "SELECT s.sub_room_name, s.sub_room_type_detail, s.dm_user_a, s.dm_user_b, "
+                "COALESCE(NULLIF(ua.full_name,''), ua.username) AS dm_a_name, "
+                "COALESCE(NULLIF(ub.full_name,''), ub.username) AS dm_b_name "
+                "FROM room_sub_rooms s "
+                "LEFT JOIN users ua ON ua.user_id = s.dm_user_a "
+                "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
+                "WHERE s.sub_room_id=%s AND s.room_id=%s",
+                (sr_id, self.room_id),
+            )
+            r = cur.fetchone()
+            cur.close()
+        except Exception as ex:
+            print(f"open_sub_room error: {ex}")
+            return
+        if not r:
+            return
+
+        is_private = r["sub_room_type_detail"] == "private"
+        name, partner = r["sub_room_name"], -1
+        if is_private:
+            a, b = r["dm_user_a"], r["dm_user_b"]
+            a_name, b_name = r["dm_a_name"] or "?", r["dm_b_name"] or "?"
+            if self.current_user_id in (a, b):
+                partner = b if a == self.current_user_id else a
+                name = f"DM-{b_name if a == self.current_user_id else a_name}"
+            elif self.current_sys_role == "admin":
+                name = f"DM-{a_name} \u2194 {b_name}"
+            else:
+                return          # DMs are only for the two people in them and admins
+        self.select_sub_room(sr_id, name, is_private, partner)
 
     # ═════════════════════════════════════════════════════════════════
     #  DM PICKER
@@ -714,22 +755,57 @@ class RoomFrame(tk.Toplevel):
         return row
 
     def kick_member(self, uid, name):
-        if not messagebox.askyesno("Remove Member", f'Remove "{name}" from this room?', parent=self):
+        if uid == self.current_user_id:
             return
+
+        # Must hold the manage-members permission (admins always do)
+        if not self.get_permission("can_manage_members"):
+            messagebox.showwarning("Not allowed",
+                                    "You don't have permission to remove members.",
+                                    parent=self)
+            return
+
+        # Look up the target fresh from the DB, not from what the screen shows
         try:
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
-            cur.execute("SELECT room_role FROM room_members WHERE room_id=%s AND user_id=%s",
-                        (self.room_id, uid))
+            cur.execute(
+                "SELECT rm.room_role, u.role AS sys_role FROM room_members rm "
+                "JOIN users u ON u.user_id = rm.user_id "
+                "WHERE rm.room_id=%s AND rm.user_id=%s",
+                (self.room_id, uid),
+            )
             row = cur.fetchone()
-            was_host = bool(row and row["room_role"] == "host")
+            cur.close()
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex), parent=self)
+            return
 
-            if was_host and self.current_sys_role != "admin":
-                cur.close()
-                messagebox.showwarning("Not allowed", "Only an administrator can remove the host.",
+        if not row:                      # already gone, just refresh the list
+            self.load_members()
+            return
+
+        was_host = row["room_role"] == "host"
+
+        if self.current_sys_role != "admin":
+            if was_host:
+                messagebox.showwarning("Not allowed",
+                                        "Only an administrator can remove the host.",
+                                        parent=self)
+                return
+            if row["sys_role"] == "admin":
+                messagebox.showwarning("Not allowed",
+                                        "Administrators can't be removed from a room.",
                                         parent=self)
                 return
 
+        if not messagebox.askyesno("Remove Member", f'Remove "{name}" from this room?',
+                                    parent=self):
+            return
+
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
             cur.execute("DELETE FROM room_members WHERE room_id=%s AND user_id=%s",
                         (self.room_id, uid))
             if was_host:
@@ -1219,12 +1295,19 @@ class RoomFrame(tk.Toplevel):
             break
 
         fr = filter_message(label, self.room_id)
-        if fr.was_flagged:
-            warn_count = record_warning(self.current_user_id)
-            show_warning_dialog(self, warn_count)
+        suspicious = find_suspicious(label)
+        if fr.was_flagged or suspicious:
             log_flagged(self.current_user_id, message_id,
-                        f"[tag label] {label}", f"[tag label] {fr.censored}")
-        self.set_message_tag(message_id, "other", fr.censored)
+                        f"[tag label] {label}", f"[tag label] {fr.censored}",
+                        category="suspicious" if suspicious else "filtered")
+            if fr.was_flagged:
+                show_warning_dialog(self, record_warning(self.current_user_id))
+            else:
+                messagebox.showinfo("Tag not saved",
+                                     "That label wasn't saved. A host or administrator may follow up with you.",
+                                     parent=self)
+            return
+        self.set_message_tag(message_id, "other", label)
 
     def set_message_tag(self, message_id, tag_key, label=None):
         """Changes the tag of one of the current user's own messages."""
@@ -1314,21 +1397,36 @@ class RoomFrame(tk.Toplevel):
             return
 
         fr = filter_message(raw_content, self.room_id)
-        final_content = fr.censored
-
         label_fr = filter_message(tag_label, self.room_id) if tag_label else None
-        final_label = label_fr.censored if label_fr else None
         label_flagged = bool(label_fr and label_fr.was_flagged)
+        filtered = fr.was_flagged or label_flagged
+        suspicious = find_suspicious(raw_content)
 
-        if fr.was_flagged or label_flagged:
-            warn_count = record_warning(self.current_user_id)
-            show_warning_dialog(self, warn_count)
-
-            if is_banned(self.current_user_id):
-                self.txt_message.delete(0, tk.END)
-                self.txt_message.configure(fg="gray", state="disabled")
-                self.btn_send.configure(state="disabled")
-                return
+        # Banned / filtered / suspicious: never reaches the chat. The admins of this
+        # department and the host get an alert and can talk to the sender privately.
+        if filtered or suspicious:
+            log_flagged(
+                self.current_user_id, None,
+                raw_content if (fr.was_flagged or suspicious) else f"[tag label] {tag_label}",
+                fr.censored,
+                category="suspicious" if suspicious else "filtered",
+                sub_room_id=self.selected_sub_room_id,
+            )
+            if filtered:
+                warn_count = record_warning(self.current_user_id)
+                show_warning_dialog(self, warn_count)
+                if is_banned(self.current_user_id):
+                    self.txt_message.delete(0, tk.END)
+                    self.txt_message.configure(fg="gray", state="disabled")
+                    self.btn_send.configure(state="disabled")
+                    return
+            else:
+                messagebox.showinfo(
+                    "Message not sent",
+                    "Your message was not sent. A host or administrator may follow up with you.",
+                    parent=self)
+            self._reset_message_box()
+            return
 
         try:
             conn = get_connection()
@@ -1338,20 +1436,10 @@ class RoomFrame(tk.Toplevel):
             cur.execute(
                 "INSERT INTO room_messages (sub_room_id, sender_id, content, is_private, "
                 "receiver_id, msg_tag, msg_tag_label) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (self.selected_sub_room_id, self.current_user_id, final_content,
-                 1 if self.selected_is_private else 0, receiver_id, tag_key, final_label),
+                (self.selected_sub_room_id, self.current_user_id, raw_content,
+                 1 if self.selected_is_private else 0, receiver_id, tag_key, tag_label),
             )
-            msg_id = cur.lastrowid
             cur.close()
-
-            if fr.was_flagged:
-                log_flagged(self.current_user_id, msg_id, raw_content, final_content)
-            if label_flagged:
-                log_flagged(self.current_user_id, msg_id,
-                            f"[tag label] {tag_label}", f"[tag label] {final_label}")
-            if find_suspicious(raw_content):
-                log_flagged(self.current_user_id, msg_id, raw_content, final_content,
-                            category="suspicious")
 
             self._reset_message_box()
             self.refresh_messages()
@@ -1420,10 +1508,21 @@ class RoomFrame(tk.Toplevel):
                     return
 
                 fr = filter_message(new_text, self.room_id)
-                final_content = fr.censored
-                if fr.was_flagged:
-                    warn_count = record_warning(self.current_user_id)
-                    show_warning_dialog(dlg, warn_count)
+                suspicious = find_suspicious(new_text)
+                if fr.was_flagged or suspicious:
+                    cur.close()
+                    log_flagged(self.current_user_id, message_id, new_text, fr.censored,
+                                category="suspicious" if suspicious else "filtered")
+                    if fr.was_flagged:
+                        show_warning_dialog(dlg, record_warning(self.current_user_id))
+                    else:
+                        messagebox.showinfo(
+                            "Edit not saved",
+                            "Your edit was not saved. A host or administrator may follow up with you.",
+                            parent=dlg)
+                    dlg.destroy()
+                    return
+                final_content = new_text
 
                 cur.execute(
                     "UPDATE room_messages SET content=%s, is_edited=1, edited_at=NOW() "
@@ -1436,9 +1535,6 @@ class RoomFrame(tk.Toplevel):
                     (message_id, old_content, final_content),
                 )
                 cur.close()
-
-                if fr.was_flagged:
-                    log_flagged(self.current_user_id, message_id, new_text, final_content)
 
                 dlg.destroy()
                 self.refresh_messages()
@@ -1576,7 +1672,7 @@ class RoomFrame(tk.Toplevel):
     def open_room_settings(self):
         dlg = tk.Toplevel(self)
         dlg.title(f"\u2699  Room Settings \u2014 {self.room_name}")
-        dlg.geometry("560x620")
+        dlg.geometry("560x665")
         dlg.transient(self)
         dlg.grab_set()
         dlg.configure(bg="#233260")
@@ -1825,6 +1921,29 @@ class RoomFrame(tk.Toplevel):
         btn_save = theme.make_button(dlg, "Save Permissions", theme.MEDIUM_BLUE, font_size=13,
                                       command=do_save)
         btn_save.place(x=165, y=552, width=230, height=38)
+        if self.my_room_role == "host" or self.current_sys_role == "admin":
+            is_arch = self._room_is_archived()
+
+            def do_toggle_archive():
+                if not is_arch:
+                    if not messagebox.askyesno(
+                            "Archive Room",
+                            f'Archive "{self.room_name}"?\n\nMembers will no longer see it in '
+                            "their dashboard. You and administrators can still open it and "
+                            "restore it later.", parent=dlg):
+                        return
+                if not self.set_room_archived(not is_arch):
+                    messagebox.showwarning("Not allowed",
+                                            "Only the host or an administrator can do that.",
+                                            parent=dlg)
+                    return
+                dlg.destroy()
+                self.go_back()
+
+            btn_archive = theme.make_button(
+                dlg, "\u267B  Restore Room" if is_arch else "\U0001F4E6  Archive Room",
+                theme.WARN_ORANGE, font_size=11, emoji=True, command=do_toggle_archive)
+            btn_archive.place(x=165, y=600, width=230, height=34)
 
     def _perm_check(self, dlg, label, selected):
         var = tk.BooleanVar(value=selected)
@@ -1846,7 +1965,7 @@ class RoomFrame(tk.Toplevel):
                  font=theme.font(13, "bold"), fg=theme.WARN_ORANGE, bg="#19233c",
                  anchor="w").place(x=14, y=12, width=670, height=22)
 
-        cols = ("Room", "Sub-room", "Sender", "Type", "Original Message", "Shown As", "Time")
+        cols = ("Room", "Sub-room", "Sender", "Type", "Original Message", "Status", "Time")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=17)
         for c, w in zip(cols, (70, 130, 70, 70, 100, 130, 98)):
             tree.heading(c, text=c)
@@ -1855,7 +1974,7 @@ class RoomFrame(tk.Toplevel):
         tree.place(x=14, y=44, width=668, height=410)
 
         try:
-            rows = get_admin_flagged(self.current_user_id)
+            rows = get_admin_flagged(self.current_user_id, is_admin=self.current_sys_role == "admin")
             for r in rows:
                 suspicious = r["category"] == "suspicious"
                 tree.insert("", tk.END, tags=("unread",) if r["is_unread"] else (), values=(
@@ -1865,7 +1984,7 @@ class RoomFrame(tk.Toplevel):
                     r["username"],
                     "Suspicious" if suspicious else "Filtered",
                     r["original"],
-                    "(not censored)" if suspicious else r["censored"],
+                    "Held back",
                     theme.fmt_datetime(r["flagged_at"]),
                 ))
             # only now does it count as read, and only for this admin
@@ -2054,8 +2173,51 @@ class RoomFrame(tk.Toplevel):
     # ═════════════════════════════════════════════════════════════════
     #  POLLING
     # ═════════════════════════════════════════════════════════════════
+    def _room_is_archived(self):
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT is_archived FROM rooms WHERE room_id=%s", (self.room_id,))
+            row = cur.fetchone()
+            cur.close()
+            return bool(row and row[0] == 1)
+        except Exception:
+            return False
+
+    def set_room_archived(self, archived):
+        """Host or admin only (checked in the query). Returns True if applied."""
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE rooms SET is_archived=%s, archived_at=IF(%s=1, NOW(), NULL) "
+                "WHERE room_id=%s AND (host_id=%s OR %s=1)",
+                (int(archived), int(archived), self.room_id, self.current_user_id,
+                 1 if self.current_sys_role == "admin" else 0),
+            )
+            ok = cur.rowcount > 0
+            cur.close()
+            return ok
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex), parent=self)
+            return False
+
+    def check_archived(self):
+        """Members still inside a room that just got archived go back to the lobby.
+        Returns True if this window was closed."""
+        if self.current_sys_role == "admin" or self.my_room_role == "host":
+            return False
+        if not self._room_is_archived():
+            return False
+        messagebox.showinfo("Room archived",
+                             "This room has been archived by its host.", parent=self)
+        self.go_back()
+        return True
+    
     def start_polling(self):
         def tick():
+            if self.check_archived():
+                return
             if self.selected_sub_room_id != -1:
                 self.refresh_messages()
             self.load_members()
@@ -2075,9 +2237,10 @@ class RoomFrame(tk.Toplevel):
             self._polling_job = None
 
     def check_admin_alerts(self):
-        if self.current_sys_role != "admin":
+        is_admin = self.current_sys_role == "admin"
+        if not is_admin and self.my_room_role != "host":
             return
-        n = count_unread_alerts(self.current_user_id)
+        n = count_unread_alerts(self.current_user_id, is_admin)
         if n:
             self.btn_alerts.configure(text=f"\u26A0 {n} new alert(s)")
             self.btn_alerts.place(x=445, y=10, width=140, height=28)
