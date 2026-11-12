@@ -140,16 +140,19 @@ class RoomLobbyFrame(tk.Tk):
             cur.execute(
                 """
                 SELECT r.room_id, r.room_name, r.description, r.host_id, r.invite_code,
+                       r.is_archived,
                        COALESCE(rm.room_role, 'member') AS room_role
                 FROM rooms r
                 LEFT JOIN room_members rm
                        ON r.room_id = rm.room_id AND rm.user_id = %s
-                WHERE rm.user_id IS NOT NULL
-                   OR r.department_id IN (
-                        SELECT department_id FROM admin_departments WHERE user_id = %s)
+                WHERE (rm.user_id IS NOT NULL
+                       OR r.department_id IN (
+                            SELECT department_id FROM admin_departments WHERE user_id = %s))
+                  AND (r.is_archived = 0 OR rm.room_role = 'host' OR %s = 1)
                 ORDER BY r.created_at ASC
                 """,
-                (self.current_user_id, self.current_user_id),
+                (self.current_user_id, self.current_user_id,
+                 1 if self.current_role == "admin" else 0),
             )
             rows = cur.fetchall()
             cur.close()
@@ -160,8 +163,11 @@ class RoomLobbyFrame(tk.Tk):
 
             for r in rows:
                 effective_role = r["room_role"]
+                desc = r["description"]
+                if r["is_archived"]:
+                    desc = "\U0001F4E6 ARCHIVED" + (f" \u2014 {desc}" if desc else "")
 
-                card = self._build_room_card(r["room_id"], r["room_name"], r["description"],
+                card = self._build_room_card(r["room_id"], r["room_name"], desc,
                                               effective_role, r["invite_code"], r["host_id"])
                 card.grid(row=row, column=col, padx=7, pady=7)
                 col += 1
@@ -557,7 +563,7 @@ class RoomLobbyFrame(tk.Tk):
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
             cur.execute(
-                "SELECT room_id, room_name, host_id FROM rooms WHERE invite_code=%s",
+                "SELECT room_id, room_name, host_id, is_archived FROM rooms WHERE invite_code=%s",
                 (code,),
             )
             room = cur.fetchone()
@@ -565,7 +571,10 @@ class RoomLobbyFrame(tk.Tk):
                 lbl_status.configure(text="Invalid code. Please try again.")
                 cur.close()
                 return
-
+            if room["is_archived"] and self.current_role != "admin":
+                lbl_status.configure(text="This room has been archived.")
+                cur.close()
+                return
             room_id, room_name, host_id = room["room_id"], room["room_name"], room["host_id"]
 
             cur.execute(
@@ -634,7 +643,7 @@ class RoomLobbyFrame(tk.Tk):
             cur = conn.cursor(dictionary=True)
             cur.execute(
                 """
-                SELECT r.room_id, r.room_name, r.host_id, u.full_name, u.username,
+                                SELECT r.room_id, r.room_name, r.host_id, sr.sub_room_id, u.full_name, u.username,
                        COUNT(*) AS n, MAX(m.sent_at) AS last_at,
                        COALESCE(rm.room_role, 'member') AS room_role
                 FROM room_messages m
@@ -643,7 +652,7 @@ class RoomLobbyFrame(tk.Tk):
                 JOIN users u ON u.user_id = m.sender_id
                 LEFT JOIN room_members rm ON rm.room_id = r.room_id AND rm.user_id = %s
                 WHERE m.is_private = 1 AND m.receiver_id = %s AND m.receiver_read = 0
-                GROUP BY r.room_id, r.room_name, r.host_id, u.user_id, u.full_name,
+                                GROUP BY r.room_id, r.room_name, r.host_id, sr.sub_room_id, u.user_id, u.full_name,
                          u.username, rm.room_role
                 ORDER BY last_at DESC
                 """,
@@ -673,7 +682,8 @@ class RoomLobbyFrame(tk.Tk):
             def make_open(rr=r):
                 def _open():
                     dlg.destroy()
-                    self.enter_room(rr["room_id"], rr["room_name"], rr["room_role"], rr["host_id"])
+                    self.enter_room(rr["room_id"], rr["room_name"], rr["room_role"],
+                                    rr["host_id"], rr["sub_room_id"])
                 return _open
 
             tk.Button(row_f, text="Open", font=theme.font(10, "bold"), fg="white",
@@ -683,11 +693,26 @@ class RoomLobbyFrame(tk.Tk):
         self._ghost_button(dlg, "Close", dlg.destroy).place(x=170, y=318, width=120, height=28)
 
     # ── Enter room ──
-    def enter_room(self, room_id, room_name, room_role, host_id):
+    def enter_room(self, room_id, room_name, room_role, host_id, open_sub_room_id=None):
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT is_archived FROM rooms WHERE room_id=%s", (room_id,))
+            row = cur.fetchone()
+            cur.close()
+            if row and row[0] == 1 and room_role != "host" and self.current_role != "admin":
+                messagebox.showinfo("Room archived",
+                                     "This room has been archived by its host.", parent=self)
+                self.refresh_rooms()
+                return
+        except Exception as ex:
+            print(f"enter_room archive check error: {ex}")
+
         self.withdraw()
         from ui.room_frame import RoomFrame
         RoomFrame(self.current_user_id, self.current_username, self.current_full_name,
-                   self.current_role, room_id, room_name, room_role, host_id, self)
+                   self.current_role, room_id, room_name, room_role, host_id, self,
+                   open_sub_room_id)
 
     # ── Helpers ──
     def _display_name(self):

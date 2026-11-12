@@ -184,13 +184,12 @@ def get_warn_count(user_id: int) -> int:
 
 
 def log_flagged(user_id: int, room_msg_id, original: str, censored: str,
-                category: str = "filtered"):
-    """Logs the flagged message to DB for admin review."""
+                category: str = "filtered", sub_room_id=None):
+    """Logs the flagged message to DB for admin/host review."""
     try:
         conn = get_connection()
         cur = conn.cursor()
-        sub_room_id = None
-        if room_msg_id:
+        if sub_room_id is None and room_msg_id:
             cur.execute("SELECT sub_room_id FROM room_messages WHERE message_id=%s",
                         (room_msg_id,))
             row = cur.fetchone()
@@ -220,8 +219,11 @@ _ADMIN_SCOPE = """
 """
 
 
-def count_unread_alerts(admin_id: int) -> int:
-    """Flagged messages in the admin's departments that THIS admin hasn't opened yet."""
+def count_unread_alerts(user_id: int, is_admin: bool = True) -> int:
+    """Held-back messages this user hasn't opened yet.
+    Admins: their departments. Hosts: the rooms they host."""
+    scope = _ADMIN_SCOPE if is_admin else "r.host_id = %s"
+    n_scope = 3 if is_admin else 1
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -230,11 +232,11 @@ def count_unread_alerts(admin_id: int) -> int:
             SELECT COUNT(*) FROM flagged_messages fm
             JOIN room_sub_rooms s ON s.sub_room_id = fm.sub_room_id
             JOIN rooms r ON r.room_id = s.room_id
-            WHERE {_ADMIN_SCOPE}
+            WHERE {scope}
               AND NOT EXISTS (SELECT 1 FROM flagged_reads fr
                               WHERE fr.flag_id = fm.id AND fr.admin_id = %s)
             """,
-            (admin_id, admin_id, admin_id, admin_id),
+            (user_id,) * (n_scope + 1),
         )
         n = cur.fetchone()[0]
         cur.close()
@@ -243,8 +245,11 @@ def count_unread_alerts(admin_id: int) -> int:
         return 0
 
 
-def get_admin_flagged(admin_id: int, limit: int = 200):
-    """Flagged messages from this admin's departments only, with per-admin unread status."""
+def get_admin_flagged(user_id: int, limit: int = 200, is_admin: bool = True):
+    """Held-back messages for this admin's departments (or this host's rooms),
+    with per-user unread status."""
+    scope = _ADMIN_SCOPE if is_admin else "r.host_id = %s"
+    n_scope = 3 if is_admin else 1
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     cur.execute(
@@ -261,11 +266,11 @@ def get_admin_flagged(admin_id: int, limit: int = 200):
         LEFT JOIN users ub ON ub.user_id = s.dm_user_b
         JOIN rooms r ON r.room_id = s.room_id
         LEFT JOIN flagged_reads fr ON fr.flag_id = fm.id AND fr.admin_id = %s
-        WHERE {_ADMIN_SCOPE}
+        WHERE {scope}
         ORDER BY fm.flagged_at DESC
         LIMIT %s
         """,
-        (admin_id, admin_id, admin_id, admin_id, limit),
+        (user_id,) * (n_scope + 1) + (limit,),
     )
     rows = cur.fetchall()
     cur.close()
@@ -301,7 +306,8 @@ def show_warning_dialog(parent, warn_count: int):
     else:
         msg = (
             f"\u26a0 Profanity Warning {warn_count}/{MAX_WARNINGS}\n\n"
-            "Your message contained inappropriate language and was censored.\n"
+            "Your message contained inappropriate language and was not sent.\n"
+            "The host and administrators have been notified.\n"
             f"You have {remaining} warning(s) left before being banned."
         )
         messagebox.showwarning("Warning", msg, parent=parent)
