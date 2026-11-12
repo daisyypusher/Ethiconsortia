@@ -45,13 +45,74 @@ class FilterResult:
     was_flagged: bool
 
 
-def filter_message(original: str) -> FilterResult:
-    """Checks message for bad words (whole words only), returns censored text + flag status."""
+def get_custom_words(room_id=None) -> list:
+    """Global words (room_id NULL) plus the words set for this room."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        if room_id is None:
+            cur.execute("SELECT word FROM filtered_words WHERE room_id IS NULL")
+        else:
+            cur.execute(
+                "SELECT word FROM filtered_words WHERE room_id IS NULL OR room_id=%s",
+                (room_id,),
+            )
+        words = [r[0] for r in cur.fetchall()]
+        cur.close()
+        return words
+    except Exception as ex:
+        print(f"ModerationFilter.get_custom_words error: {ex}")
+        return []
+
+
+def add_filtered_word(word: str, room_id, added_by: int):
+    """room_id=None -> global word. Returns (ok, message)."""
+    word = word.strip().lower()
+    if not word:
+        return False, "Please type a word."
+    if len(word) > 50:
+        return False, "Word can be at most 50 characters."
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        if room_id is None:
+            cur.execute("SELECT 1 FROM filtered_words WHERE room_id IS NULL AND word=%s", (word,))
+        else:
+            cur.execute("SELECT 1 FROM filtered_words WHERE room_id=%s AND word=%s",
+                        (room_id, word))
+        if cur.fetchone():
+            cur.close()
+            return False, "That word is already in the list."
+        cur.execute(
+            "INSERT INTO filtered_words (room_id, word, added_by) VALUES (%s,%s,%s)",
+            (room_id, word, added_by),
+        )
+        cur.close()
+        return True, ""
+    except Exception as ex:
+        return False, f"DB Error: {ex}"
+
+
+def remove_filtered_word(word_id: int):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM filtered_words WHERE word_id=%s", (word_id,))
+        cur.close()
+    except Exception as ex:
+        print(f"ModerationFilter.remove_filtered_word error: {ex}")
+
+
+def filter_message(original: str, room_id=None) -> FilterResult:
+    """Whole-word check against the built-in list + this room's custom words
+    + global custom words. Returns censored text + flag status."""
+    words = set(BAD_WORDS) | {w.lower() for w in get_custom_words(room_id)}
     censored = original
     flagged = False
 
-    for word in BAD_WORDS:
-        pattern = re.compile(r"\b" + re.escape(word) + r"\b", re.IGNORECASE)
+    # longest first, so "putang ina" is handled before "puta"
+    for word in sorted(words, key=len, reverse=True):
+        pattern = re.compile(r"(?<!\w)" + re.escape(word) + r"(?!\w)", re.IGNORECASE)
         if pattern.search(censored):
             flagged = True
             censored = pattern.sub(lambda m: "*" * len(m.group()), censored)

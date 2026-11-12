@@ -173,8 +173,8 @@ CREATE TABLE `room_sub_rooms` (
 --
 
 INSERT INTO `room_sub_rooms` (`sub_room_id`, `room_id`, `sub_room_name`, `sub_room_type`, `position`, `sub_room_type_detail`, `dm_user_a`, `dm_user_b`) VALUES
-(1, 1, 'general', 'text', 0, 'public', NULL, NULL),
-(2, 1, 'announcements', 'announcement', 1, 'public', NULL, NULL),
+(1, 1, 'General', 'text', 0, 'public', NULL, NULL),
+(2, 1, 'Announcements', 'announcement', 1, 'public', NULL, NULL),
 (3, 1, 'open-forum', 'text', 2, 'public', NULL, NULL),
 (4, 1, 'hello', 'text', 3, 'public', NULL, NULL);
 

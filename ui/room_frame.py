@@ -14,7 +14,9 @@ from db.connection import get_connection
 from ui import theme, emote_picker, image_message_handler as imh
 from ui.moderation_filter import (
     filter_message, record_warning, show_warning_dialog, is_banned, log_flagged,
-    find_suspicious, count_unread_alerts, get_admin_flagged, mark_alerts_read,
+    find_suspicious,
+    count_unread_alerts, get_admin_flagged, mark_alerts_read,
+    add_filtered_word, remove_filtered_word,
 )
 
 EMOTES = [
@@ -45,6 +47,9 @@ TAG_COLORS = {
     "other":        "#6482b4",
 }
 
+RESTRICTED_MSG = "Messaging is restricted in this room."
+ANNOUNCE_RESTRICTED_MSG = "Only host, admins and moderators can post."
+
 class RoomFrame(tk.Toplevel):
     def __init__(self, user_id, username, full_name, sys_role,
                  room_id, room_name, room_role, host_id, parent_lobby):
@@ -63,6 +68,7 @@ class RoomFrame(tk.Toplevel):
         self.selected_sub_room_name = ""
         self.selected_is_private = False
         self.selected_dm_partner_id = -1
+        self.selected_sub_room_type = "text"
         self._polling_job = None
         self._img_refs = []  # keep PhotoImage references alive
         self._last_msg_sig = None       # what the chat currently shows
@@ -155,6 +161,12 @@ class RoomFrame(tk.Toplevel):
         btn_dm = theme.make_button(p, "\u2709  New Private Message", theme.DM_BADGE_BG,
                                     font_size=10, command=self.open_dm_picker)
         btn_dm.place(x=8, y=582, width=204, height=32)
+
+        if self.current_sys_role in ("professor", "admin"):
+            btn_fw = theme.make_button(p, "\U0001F6AB  Filtered Words", theme.WARN_ORANGE,
+                                        font_size=10, emoji=True,
+                                        command=self.open_filtered_words_dialog)
+            btn_fw.place(x=8, y=618, width=204, height=30)
 
         # User info bar
         user_bar = tk.Frame(p, bg="#162248")
@@ -287,6 +299,20 @@ class RoomFrame(tk.Toplevel):
         self.selected_sub_room_name = ch_name
         self.selected_is_private = is_private
         self.selected_dm_partner_id = dm_partner_id
+
+        self.selected_sub_room_type = "text"
+        if not is_private:
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT sub_room_type FROM room_sub_rooms WHERE sub_room_id=%s",
+                            (ch_id,))
+                row = cur.fetchone()
+                cur.close()
+                if row:
+                    self.selected_sub_room_type = row[0]
+            except Exception as ex:
+                print(f"select_sub_room type lookup error: {ex}")
 
         prefix = "\U0001F512 " if is_private else "\u25B8 "
         suffix = "  [Private]" if is_private else ""
@@ -505,6 +531,8 @@ class RoomFrame(tk.Toplevel):
         if self.selected_sub_room_id == -1:
             messagebox.showinfo("Info", "Please select a sub-room first.", parent=self)
             return
+        if not self._check_can_post():
+            return
         try:
             conn = get_connection()
             cur = conn.cursor()
@@ -524,6 +552,8 @@ class RoomFrame(tk.Toplevel):
     def open_image_chooser(self):
         if self.selected_sub_room_id == -1:
             messagebox.showinfo("Info", "Please select a sub-room first.", parent=self)
+            return
+        if not self._check_can_post():
             return
         path = imh.choose_attachment(self)
         if not path:
@@ -583,7 +613,7 @@ class RoomFrame(tk.Toplevel):
             cur.execute(
                 """
                 SELECT u.user_id, u.full_name, u.username,
-                       u.role AS sys_role, rm.room_role,
+                                              u.role AS sys_role, rm.room_role, rm.can_post_announcements,
                        COALESCE(uw.is_banned, 0) AS is_banned
                 FROM room_members rm
                 JOIN users u ON rm.user_id = u.user_id
@@ -627,13 +657,14 @@ class RoomFrame(tk.Toplevel):
                 last_section = section
 
             self._build_member_row(r["user_id"], r["full_name"], r["username"],
-                                    sys_role, member_role, is_banned_u).pack(fill="x")
+                                    sys_role, member_role, is_banned_u,
+                                    r["can_post_announcements"] == 1).pack(fill="x")
 
     def _build_section_header(self, text):
         return tk.Label(self.members_list_panel, text=text, font=theme.font(10, "bold"),
                          fg="#6482b4", bg=theme.RIGHT_BG, anchor="center", pady=6)
 
-    def _build_member_row(self, uid, fn, un, sys_role, member_role, is_banned_u):
+    def _build_member_row(self, uid, fn, un, sys_role, member_role, is_banned_u, is_mod=False):
         row = tk.Frame(self.members_list_panel, bg=(
             "#d2e1f5" if uid == self.current_user_id else theme.RIGHT_BG), height=40)
         row.pack_propagate(False)
@@ -657,6 +688,8 @@ class RoomFrame(tk.Toplevel):
                  anchor="w").place(x=50, y=6, width=160, height=15)
 
         sub = f"HOST \u00b7 {theme.role_label(sys_role)}" if member_role == "host" else theme.role_label(sys_role)
+        if is_mod and member_role != "host" and sys_role != "admin":
+            sub += "  \u00b7  MODERATOR"
         tk.Label(row, text=sub, font=theme.font(9), fg=(theme.RED_ACCENT if member_role == "host"
                  else "#6482b4"), bg=row["bg"], anchor="w").place(x=50, y=22, width=160, height=13)
 
@@ -880,7 +913,7 @@ class RoomFrame(tk.Toplevel):
             priv = r["is_private"] == 1
             ts = r["sent_at"]
             date = ts.strftime("%Y-%m-%d")
-            time_str = ts.strftime("%H:%M")
+            time_str = theme.fmt_time(ts)
             is_me = sender == self.current_username
 
             if date != last_date:
@@ -1185,7 +1218,7 @@ class RoomFrame(tk.Toplevel):
                 continue
             break
 
-        fr = filter_message(label)
+        fr = filter_message(label, self.room_id)
         if fr.was_flagged:
             warn_count = record_warning(self.current_user_id)
             show_warning_dialog(self, warn_count)
@@ -1277,17 +1310,13 @@ class RoomFrame(tk.Toplevel):
             )
             return
 
-        if (not self.selected_is_private and self.current_sys_role != "admin"):
-            if not self.get_permission("can_send_messages"):
-                messagebox.showwarning(
-                    "Permission Denied",
-                    "You don't have permission to send messages in this room.", parent=self)
-                return
+        if not self._check_can_post():
+            return
 
-        fr = filter_message(raw_content)
+        fr = filter_message(raw_content, self.room_id)
         final_content = fr.censored
 
-        label_fr = filter_message(tag_label) if tag_label else None
+        label_fr = filter_message(tag_label, self.room_id) if tag_label else None
         final_label = label_fr.censored if label_fr else None
         label_flagged = bool(label_fr and label_fr.was_flagged)
 
@@ -1390,7 +1419,7 @@ class RoomFrame(tk.Toplevel):
                     dlg.destroy()
                     return
 
-                fr = filter_message(new_text)
+                fr = filter_message(new_text, self.room_id)
                 final_content = fr.censored
                 if fr.was_flagged:
                     warn_count = record_warning(self.current_user_id)
@@ -1451,13 +1480,51 @@ class RoomFrame(tk.Toplevel):
             if not rows:
                 txt.insert(tk.END, "No edits recorded.")
             for r in rows:
-                txt.insert(tk.END, f'{r["edited_at"].strftime("%Y-%m-%d %H:%M")}\n'
+                txt.insert(tk.END, f'{theme.fmt_datetime(r["edited_at"])}\n'
                                    f'  Before: {r["old_content"]}\n'
                                    f'  After:  {r["new_content"]}\n\n')
         except Exception as ex:
             txt.insert(tk.END, f"Error loading history: {ex}")
         txt.configure(state="disabled")
 
+    def can_post_announcements(self):
+        """Admins and the host always can; members only if made a Moderator."""
+        if self.current_sys_role == "admin":
+            return True
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT room_role, can_post_announcements FROM room_members "
+                "WHERE room_id=%s AND user_id=%s",
+                (self.room_id, self.current_user_id),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if row:
+                return row[0] == "host" or row[1] == 1
+        except Exception as ex:
+            print(f"can_post_announcements error: {ex}")
+        return False
+
+    def _check_can_post(self):
+        """Shows a warning and returns False if the user can't post in the selected sub-room."""
+        if self.selected_is_private or self.current_sys_role == "admin":
+            return True
+        if self.selected_sub_room_type == "announcement":
+            if self.can_post_announcements():
+                return True
+            messagebox.showwarning(
+                "Permission Denied",
+                "Only the host, admins and moderators can post in an announcement sub-room.",
+                parent=self)
+            return False
+        if not self.get_permission("can_send_messages"):
+            messagebox.showwarning(
+                "Permission Denied",
+                "You don't have permission to send messages in this room.", parent=self)
+            return False
+        return True
     # ═════════════════════════════════════════════════════════════════
     #  PERMISSIONS
     # ═════════════════════════════════════════════════════════════════
@@ -1483,30 +1550,25 @@ class RoomFrame(tk.Toplevel):
         return True
 
     def apply_permissions_to_input(self):
-        if self.selected_is_private:
-            self.txt_message.configure(state="normal")
-            self.btn_send.configure(state="normal")
-            return
-
-        if self.current_sys_role == "admin":
-            self.txt_message.configure(state="normal")
-            self.btn_send.configure(state="normal")
-            return
-
-        can_send = self.get_permission("can_send_messages")
-        state = "normal" if can_send else "disabled"
-        self.txt_message.configure(state=state)
-        self.btn_send.configure(state=state)
-        if not can_send:
-            self.txt_message.configure(state="normal")
-            self.txt_message.delete(0, tk.END)
-            self.txt_message.insert(0, "Messaging is restricted in this room.")
-            self.txt_message.configure(fg="#a05050", state="disabled")
+        if self.selected_is_private or self.current_sys_role == "admin":
+            allowed, reason = True, ""
+        elif self.selected_sub_room_type == "announcement":
+            allowed, reason = self.can_post_announcements(), ANNOUNCE_RESTRICTED_MSG
         else:
-            if self.txt_message.get() == "Messaging is restricted in this room.":
+            allowed, reason = self.get_permission("can_send_messages"), RESTRICTED_MSG
+
+        self.btn_send.configure(state="normal" if allowed else "disabled")
+        self.txt_message.configure(state="normal")
+        if allowed:
+            if self.txt_message.get() in (RESTRICTED_MSG, ANNOUNCE_RESTRICTED_MSG):
                 self.txt_message.delete(0, tk.END)
                 self.txt_message.insert(0, "Type a message...")
                 self.txt_message.configure(fg="gray")
+        else:
+            if self.txt_message.get() != reason:
+                self.txt_message.delete(0, tk.END)
+                self.txt_message.insert(0, reason)
+            self.txt_message.configure(fg="#a05050", state="disabled")
 
     # ═════════════════════════════════════════════════════════════════
     #  ROOM SETTINGS (host / admin only)
@@ -1546,7 +1608,8 @@ class RoomFrame(tk.Toplevel):
             cur.execute(
                 """
                 SELECT u.user_id, u.full_name, u.username, rm.room_role,
-                       rm.can_send_messages, rm.can_read_history, rm.can_manage_members
+                       rm.can_send_messages, rm.can_read_history, rm.can_manage_members,
+                       rm.can_post_announcements
                 FROM room_members rm
                 JOIN users u ON u.user_id = rm.user_id
                 WHERE rm.room_id = %s AND (rm.room_role != 'host' OR %s) AND u.role != 'admin'
@@ -1568,11 +1631,13 @@ class RoomFrame(tk.Toplevel):
                             fg="#a0c8ff", bg="#233260", anchor="w")
         lbl_sel.place(x=285, y=148, width=255, height=18)
         cb_send = self._perm_check(dlg, "Can Send Messages", True)
-        cb_send.place(x=285, y=170, width=240, height=24)
+        cb_send.place(x=285, y=168, width=240, height=22)
         cb_read = self._perm_check(dlg, "Can Read History", True)
-        cb_read.place(x=285, y=196, width=240, height=24)
+        cb_read.place(x=285, y=190, width=240, height=22)
         cb_manage = self._perm_check(dlg, "Can Manage Members", False)
-        cb_manage.place(x=285, y=222, width=240, height=24)
+        cb_manage.place(x=285, y=212, width=240, height=22)
+        cb_mod = self._perm_check(dlg, "Moderator (post in announcements)", False)
+        cb_mod.place(x=285, y=234, width=250, height=22)
 
         def on_pick(_e=None):
             sel = lb_members.curselection()
@@ -1584,6 +1649,7 @@ class RoomFrame(tk.Toplevel):
             cb_send.var.set(r["can_send_messages"] == 1)
             cb_read.var.set(r["can_read_history"] == 1)
             cb_manage.var.set(r["can_manage_members"] == 1)
+            cb_mod.var.set(r["can_post_announcements"] == 1)
 
         lb_members.bind("<<ListboxSelect>>", on_pick)
 
@@ -1750,8 +1816,10 @@ class RoomFrame(tk.Toplevel):
             label = lb_members.get(sel[0])
             r = perm_data[label]
             s, rd, m = bool(cb_send.var.get()), bool(cb_read.var.get()), bool(cb_manage.var.get())
-            self.save_member_perms(r["user_id"], s, rd, m)
+            mod = bool(cb_mod.var.get())
+            self.save_member_perms(r["user_id"], s, rd, m, mod)
             r["can_send_messages"], r["can_read_history"], r["can_manage_members"] = int(s), int(rd), int(m)
+            r["can_post_announcements"] = int(mod)
             save_status.configure(fg="#50d250", text=f"\u2713 Saved for {label[:30]}")
 
         btn_save = theme.make_button(dlg, "Save Permissions", theme.MEDIUM_BLUE, font_size=13,
@@ -1798,7 +1866,7 @@ class RoomFrame(tk.Toplevel):
                     "Suspicious" if suspicious else "Filtered",
                     r["original"],
                     "(not censored)" if suspicious else r["censored"],
-                    r["flagged_at"].strftime("%Y-%m-%d %H:%M"),
+                    theme.fmt_datetime(r["flagged_at"]),
                 ))
             # only now does it count as read, and only for this admin
             mark_alerts_read(self.current_user_id,
@@ -1808,19 +1876,119 @@ class RoomFrame(tk.Toplevel):
             messagebox.showerror("Error", str(ex), parent=dlg)
 
     # ═════════════════════════════════════════════════════════════════
+    #  FILTERED WORDS (professor / admin)
+    # ═════════════════════════════════════════════════════════════════
+    def open_filtered_words_dialog(self):
+        if self.current_sys_role not in ("professor", "admin"):
+            return
+        is_admin = self.current_sys_role == "admin"
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Filtered Words")
+        dlg.geometry("420x470")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg=theme.SUB_ROOM_BG)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="Filtered Words", font=theme.font(14, "bold"), fg="white",
+                 bg=theme.SUB_ROOM_BG, anchor="w").place(x=20, y=14, width=380, height=24)
+        tk.Label(dlg, text=f"Messages containing these words are censored in {self.room_name}.",
+                 font=theme.font(10, slant="italic"), fg=theme.SOFT_BLUE,
+                 bg=theme.SUB_ROOM_BG, anchor="w", wraplength=380,
+                 justify="left").place(x=20, y=40, width=380, height=30)
+
+        lb = tk.Listbox(dlg, bg="#1c2a55", fg="white", font=theme.font(12),
+                         selectbackground=theme.MEDIUM_BLUE, exportselection=False,
+                         highlightthickness=1, highlightbackground=theme.MEDIUM_BLUE)
+        lb.place(x=20, y=78, width=380, height=210)
+
+        entries = []   # parallel to the listbox rows: (word_id, room_id)
+
+        def load():
+            lb.delete(0, tk.END)
+            entries.clear()
+            try:
+                conn = get_connection()
+                cur = conn.cursor(dictionary=True)
+                cur.execute(
+                    "SELECT word_id, room_id, word FROM filtered_words "
+                    "WHERE room_id=%s OR room_id IS NULL "
+                    "ORDER BY room_id IS NULL DESC, word ASC",
+                    (self.room_id,),
+                )
+                for r in cur.fetchall():
+                    scope = "  [ALL ROOMS]" if r["room_id"] is None else ""
+                    lb.insert(tk.END, r["word"] + scope)
+                    entries.append((r["word_id"], r["room_id"]))
+                cur.close()
+            except Exception as ex:
+                status.configure(fg="#ff8080", text=f"Error: {ex}")
+
+        status = tk.Label(dlg, text="", font=theme.font(10), bg=theme.SUB_ROOM_BG,
+                          anchor="center")
+        status.place(x=20, y=296, width=380, height=18)
+
+        tf_word = tk.Entry(dlg, font=theme.font(12), bg="white", fg=theme.DARK_NAVY,
+                            relief="solid", bd=1, highlightthickness=1,
+                            highlightbackground=theme.SOFT_BLUE)
+        tf_word.place(x=20, y=322, width=250, height=32)
+
+        all_rooms_var = tk.BooleanVar(value=False)
+        if is_admin:
+            tk.Checkbutton(dlg, text="Apply to all rooms", variable=all_rooms_var,
+                           font=theme.font(10), fg="white", bg=theme.SUB_ROOM_BG,
+                           selectcolor=theme.SUB_ROOM_BG, activebackground=theme.SUB_ROOM_BG,
+                           activeforeground="white").place(x=20, y=358, width=200, height=22)
+
+        def do_add():
+            scope = None if (is_admin and all_rooms_var.get()) else self.room_id
+            ok, msg = add_filtered_word(tf_word.get(), scope, self.current_user_id)
+            if ok:
+                tf_word.delete(0, tk.END)
+                status.configure(fg="#50d250", text="\u2713 Word added.")
+                load()
+            else:
+                status.configure(fg="#ff8080", text=msg)
+
+        def do_remove():
+            sel = lb.curselection()
+            if not sel:
+                status.configure(fg="#ff8080", text="Select a word first.")
+                return
+            word_id, scope_room = entries[sel[0]]
+            if scope_room is None and not is_admin:
+                status.configure(fg="#ff8080", text="Only an administrator can remove global words.")
+                return
+            remove_filtered_word(word_id)
+            status.configure(fg="#50d250", text="\u2713 Word removed.")
+            load()
+
+        theme.make_button(dlg, "Add", theme.MEDIUM_BLUE, font_size=11,
+                          command=do_add).place(x=280, y=322, width=120, height=32)
+        theme.make_button(dlg, "Remove Selected", theme.RED_ACCENT, font_size=11,
+                          command=do_remove).place(x=20, y=392, width=180, height=34)
+        theme.make_button(dlg, "Close", "#28376e", font_size=11,
+                          command=dlg.destroy).place(x=280, y=392, width=120, height=34)
+        tf_word.bind("<Return>", lambda e: do_add())
+
+        load()
+
+    # ═════════════════════════════════════════════════════════════════
     #  PERMISSION HELPERS
     # ═════════════════════════════════════════════════════════════════
-    def save_member_perms(self, user_id, can_send, can_read, can_manage):
+    def save_member_perms(self, user_id, can_send, can_read, can_manage, can_post_announce=False):
         # only an admin may change a host's permissions; everyone else is limited to non-hosts
         try:
             conn = get_connection()
             cur = conn.cursor()
             sql = ("UPDATE room_members SET can_send_messages=%s, can_read_history=%s, "
-                   "can_manage_members=%s WHERE room_id=%s AND user_id=%s")
+                   "can_manage_members=%s, can_post_announcements=%s "
+                   "WHERE room_id=%s AND user_id=%s")
             if self.current_sys_role != "admin":
                 sql += " AND room_role != 'host'"
             cur.execute(sql, (int(can_send), int(can_read), int(can_manage),
-                              self.room_id, user_id))
+                              int(can_post_announce), self.room_id, user_id))
             cur.close()
         except Exception as ex:
             print(f"save_member_perms error: {ex}")
