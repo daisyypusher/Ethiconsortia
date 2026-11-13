@@ -354,6 +354,12 @@ class RoomLobbyFrame(tk.Tk):
                 (room_id, self.current_user_id),
             )
 
+            # admins monitor the department of any room they create
+            if self.current_role == "admin":
+                cur.execute(
+                    "INSERT IGNORE INTO admin_departments (user_id, department_id) "
+                    "VALUES (%s, %s)", (self.current_user_id, dept_id))
+
             sub_rooms = [("General", "text", 0), ("Announcements", "announcement", 1)]
             for sr_name, sr_type, pos in sub_rooms:
                 is_ann = sr_type == "announcement"
