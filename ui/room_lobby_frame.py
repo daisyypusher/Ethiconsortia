@@ -3,11 +3,16 @@ ui/room_lobby_frame.py
 ─────────────────────────────────────────────────────────────
 """
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import uuid
 
 from db.connection import get_connection
 from ui import theme
+from ui.moderation_filter import (
+    get_admin_departments, get_department_people,
+    ban_in_department, unban_in_department, kick_from_department,
+    is_locked_out, is_department_banned, is_banned,
+)
 
 
 class RoomLobbyFrame(tk.Tk):
@@ -115,6 +120,11 @@ class RoomLobbyFrame(tk.Tk):
                                         activeforeground="white",
                                         command=self.show_leave_department_dialog)
             btn_leave_dept.place(x=569, y=458, width=210, height=26)
+            btn_members = theme.make_button(content, "\U0001F465   Department Members", "#28376e",
+                                             hover_bg=theme.darker("#28376e"), font_size=13,
+                                             emoji=True,
+                                             command=self.show_department_members_dialog)
+            btn_members.place(x=109, y=462, width=440, height=48)
         else:
             btn_create = theme.make_button(content, "\uff0b   Create Room", theme.MEDIUM_BLUE,
                                             hover_bg=theme.darker(theme.MEDIUM_BLUE), font_size=15,
@@ -160,7 +170,7 @@ class RoomLobbyFrame(tk.Tk):
             )
             rows = cur.fetchall()
             cur.close()
-
+            rows = [r for r in rows if not is_locked_out(self.current_user_id, r["room_id"])]
             # show the bottom-left button only if this host/admin has archived rooms
             try:
                 n_arch = len(self._fetch_archived_rooms())
@@ -298,39 +308,66 @@ class RoomLobbyFrame(tk.Tk):
         self._dlg_label(dlg, "Description (optional)", 20, 120)
         tf_desc = self._dlg_field(dlg, 20, 141, 380)
 
-        self._dlg_label(dlg, "Department Name *", 20, 185)
-        tf_dept_name = self._dlg_field(dlg, 20, 206, 380)
+        in_dept = tk.BooleanVar(value=False)
 
-        self._dlg_label(dlg, "Department ID *", 20, 250)
-        tf_dept_id = self._dlg_field(dlg, 20, 271, 380)
+        tk.Checkbutton(dlg, text="Create inside a department", variable=in_dept,
+                       command=lambda: toggle_dept(), font=theme.font(11, "bold"),
+                       fg="white", bg=theme.ROOMS_BG, selectcolor=theme.ROOMS_BG,
+                       activebackground=theme.ROOMS_BG, activeforeground="white",
+                       anchor="w").place(x=20, y=183, width=380, height=22)
+
+        lbl_dn = tk.Label(dlg, text="Department Name *", font=theme.font(11, "bold"),
+                          fg="white", bg=theme.ROOMS_BG, anchor="w")
+        tf_dept_name = self._dlg_field(dlg, 20, 229, 380)
+        lbl_di = tk.Label(dlg, text="Department ID *", font=theme.font(11, "bold"),
+                          fg="white", bg=theme.ROOMS_BG, anchor="w")
+        tf_dept_id = self._dlg_field(dlg, 20, 287, 380)
+        tf_dept_name.place_forget()      # hidden until the box is ticked
+        tf_dept_id.place_forget()
+
+        def toggle_dept():
+            if in_dept.get():
+                lbl_dn.place(x=20, y=210, width=380, height=18)
+                tf_dept_name.place(x=20, y=229, width=380, height=32)
+                lbl_di.place(x=20, y=268, width=380, height=18)
+                tf_dept_id.place(x=20, y=287, width=380, height=32)
+            else:
+                for w in (lbl_dn, tf_dept_name, lbl_di, tf_dept_id):
+                    w.place_forget()
 
         lbl_status = tk.Label(dlg, text="", font=theme.font(11), fg=theme.RED_ACCENT,
                                bg=theme.ROOMS_BG, anchor="center")
-        lbl_status.place(x=20, y=320, width=380, height=18)
+        lbl_status.place(x=20, y=324, width=380, height=18)
 
         def do_create():
             name = tf_name.get().strip()
             desc = tf_desc.get().strip()
-            dept_name = tf_dept_name.get().strip()
-            dept_id = tf_dept_id.get().strip()
             if not name:
                 lbl_status.configure(text="Room name is required.")
                 return
             if len(name) > 50:
                 lbl_status.configure(text="Name too long (max 50 chars).")
                 return
-            if not dept_name or not dept_id:
-                lbl_status.configure(text="Department name and ID are required.")
-                return
-            # ⬇ keep whatever call matches YOUR _do_create_room signature
+
+            dept_name = dept_id = None           # None = room outside any department
+            if in_dept.get():
+                dept_name = tf_dept_name.get().strip()
+                dept_id = tf_dept_id.get().strip()
+                if not dept_name or not dept_id:
+                    lbl_status.configure(text="Department name and ID are required.")
+                    return
+                if is_department_banned(self.current_user_id, dept_id):
+                    lbl_status.configure(text="You are banned from this department.")
+                    return
+
             self._do_create_room(name=name, desc=desc, dept_name=dept_name,
                                  dept_id=dept_id, dlg=dlg)
 
         btn_ok = self._dialog_button(dlg, "Create Room", theme.MEDIUM_BLUE, do_create)
-        btn_ok.place(x=100, y=346, width=220, height=40)
+        btn_ok.place(x=100, y=352, width=220, height=40)
 
         btn_cancel = self._ghost_button(dlg, "Cancel", dlg.destroy)
-        btn_cancel.place(x=150, y=394, width=120, height=26)
+        btn_cancel.place(x=150, y=400, width=120, height=26)
 
     def _do_create_room(self, name, desc, dept_name, dept_id, dlg):
         try:
@@ -425,6 +462,10 @@ class RoomLobbyFrame(tk.Tk):
                 info = cur.fetchone()
                 if not info or info["n"] == 0:
                     lbl_status.configure(text="No rooms found for that Department ID.")
+                    cur.close()
+                    return
+                if is_department_banned(self.current_user_id, dept_id):
+                    lbl_status.configure(text="You are banned from this department.")
                     cur.close()
                     return
                 cur.execute(
@@ -596,6 +637,10 @@ class RoomLobbyFrame(tk.Tk):
                 cur.close()
                 return
             room_id, room_name, host_id = room["room_id"], room["room_name"], room["host_id"]
+            if is_locked_out(self.current_user_id, room_id):
+                lbl_status.configure(text="You are banned from this room's department.")
+                cur.close()
+                return
 
             cur.execute(
                 "SELECT room_role FROM room_members WHERE room_id=%s AND user_id=%s",
@@ -627,11 +672,16 @@ class RoomLobbyFrame(tk.Tk):
     def _count_unread_dms(self):
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM room_messages WHERE is_private=1 "
-                    "AND receiver_id=%s AND receiver_read=0", (self.current_user_id,))
-        n = cur.fetchone()[0]
+        cur.execute(
+            "SELECT sr.room_id, COUNT(*) FROM room_messages m "
+            "JOIN room_sub_rooms sr ON sr.sub_room_id = m.sub_room_id "
+            "WHERE m.is_private=1 AND m.receiver_id=%s AND m.receiver_read=0 "
+            "GROUP BY sr.room_id", (self.current_user_id,))
+        rows = cur.fetchall()
         cur.close()
-        return n
+        return sum(n for rid, n in rows
+                   if not (is_locked_out(self.current_user_id, rid)
+                           or is_banned(self.current_user_id, rid)))
 
     def _poll_notifications(self):
         try:
@@ -680,6 +730,9 @@ class RoomLobbyFrame(tk.Tk):
             )
             rows = cur.fetchall()
             cur.close()
+            rows = [r for r in rows
+                    if not (is_locked_out(self.current_user_id, r["room_id"])
+                            or is_banned(self.current_user_id, r["room_id"]))]
         except Exception as ex:
             tk.Label(panel, text=f"DB Error: {ex}", fg=theme.RED_ACCENT, bg="#1c2a55",
                      wraplength=390).pack(pady=20)
@@ -737,7 +790,7 @@ class RoomLobbyFrame(tk.Tk):
         )
         rows = cur.fetchall()
         cur.close()
-        return rows
+        return [r for r in rows if not is_locked_out(uid, r["room_id"])]
 
     def show_archived_rooms_dialog(self):
         dlg = tk.Toplevel(self)
@@ -785,8 +838,9 @@ class RoomLobbyFrame(tk.Tk):
                 row_f = tk.Frame(list_panel, bg="#1c2a55", height=40)
                 row_f.pack(fill="x")
                 row_f.pack_propagate(False)
-                tk.Checkbutton(row_f, variable=var, bg="#1c2a55", selectcolor="#1c2a55",
-                               activebackground="#1c2a55").place(x=6, y=8, width=24, height=24)
+                tk.Checkbutton(row_f, variable=var, bg="#1c2a55", fg="white",
+                               selectcolor="#1c2a55", activebackground="#1c2a55",
+                               activeforeground="white").place(x=6, y=8, width=24, height=24)
                 name = r["room_name"]
                 shown = name if len(name) <= 30 else name[:29] + "\u2026"
                 tk.Label(row_f, text=shown, font=theme.font(12), fg="white", bg="#1c2a55",
@@ -834,6 +888,20 @@ class RoomLobbyFrame(tk.Tk):
 
     # ── Enter room ──
     def enter_room(self, room_id, room_name, room_role, host_id, open_sub_room_id=None):
+        if is_locked_out(self.current_user_id, room_id):
+            messagebox.showwarning(
+                "Access removed",
+                "You are banned from this room's department.\n"
+                "An administrator must unban you first.", parent=self)
+            self.refresh_rooms()
+            return
+        if is_banned(self.current_user_id, room_id):
+            messagebox.showwarning(
+                "Banned",
+                f'You are banned from "{room_name}".\n'
+                "An administrator must unban you before you can enter this room.",
+                parent=self)
+            return
         try:
             conn = get_connection()
             cur = conn.cursor()
@@ -853,6 +921,153 @@ class RoomLobbyFrame(tk.Tk):
         RoomFrame(self.current_user_id, self.current_username, self.current_full_name,
                    self.current_role, room_id, room_name, room_role, host_id, self,
                    open_sub_room_id)
+
+    # ── DEPARTMENT MEMBERS (admin only): kick / ban admins and professors ──
+    def show_department_members_dialog(self):
+        if self.current_role != "admin":
+            return
+        bg = theme.ROOMS_BG
+        dlg = tk.Toplevel(self)
+        dlg.title("Department Members")
+        dlg.geometry("560x520")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg=bg)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="Department Members", font=theme.font(16, "bold"), fg="white",
+                 bg=bg, anchor="w").place(x=20, y=15, width=520, height=26)
+        tk.Label(dlg, text="Kick removes a person from every room in the department. "
+                           "Ban stops them from messaging in any of its rooms.",
+                 font=theme.font(10, slant="italic"), fg=theme.SOFT_BLUE, bg=bg, anchor="w",
+                 wraplength=520, justify="left").place(x=20, y=43, width=520, height=30)
+
+        try:
+            depts = get_admin_departments(self.current_user_id)
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex), parent=dlg)
+            dlg.destroy()
+            return
+        ids = [d for d, _n in depts]
+        cmb = ttk.Combobox(dlg, values=[f"{n or d}  ({d})" for d, n in depts],
+                           state="readonly", font=theme.font(11))
+        cmb.place(x=20, y=80, width=520, height=28)
+
+        outer = tk.Frame(dlg, bg="#1c2a55", highlightthickness=1,
+                         highlightbackground=theme.MEDIUM_BLUE)
+        outer.place(x=20, y=118, width=520, height=320)
+        canvas = tk.Canvas(outer, bg="#1c2a55", highlightthickness=0)
+        sb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        panel = tk.Frame(canvas, bg="#1c2a55")
+        canvas.create_window((0, 0), window=panel, anchor="nw", width=498)
+        panel.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        lbl_status = tk.Label(dlg, text="", font=theme.font(11, "bold"), bg=bg, anchor="center")
+        lbl_status.place(x=20, y=446, width=520, height=18)
+
+        def current_dept():
+            i = cmb.current()
+            return ids[i] if 0 <= i < len(ids) else None
+
+        def say(msg, ok=True):
+            lbl_status.configure(fg="#50d250" if ok else "#ff8080", text=msg)
+
+        def load(_e=None):
+            for w in panel.winfo_children():
+                w.destroy()
+            dept = current_dept()
+            if dept is None:
+                tk.Label(panel, text="You have no departments yet.",
+                         font=theme.font(12, slant="italic"), fg="#78a0c8",
+                         bg="#1c2a55").pack(pady=90)
+                return
+            try:
+                people = get_department_people(dept, self.current_user_id)
+            except Exception as ex:
+                tk.Label(panel, text=f"DB Error: {ex}", font=theme.font(10), fg=theme.RED_ACCENT,
+                         bg="#1c2a55", wraplength=460).pack(pady=20)
+                return
+            if not people:
+                tk.Label(panel, text="No other admins or professors here.",
+                         font=theme.font(12, slant="italic"), fg="#78a0c8",
+                         bg="#1c2a55").pack(pady=90)
+                return
+
+            for p in people:
+                uid = p["user_id"]
+                name = p["full_name"] or p["username"]
+                banned = p["is_banned"] == 1
+                row_f = tk.Frame(panel, bg="#1c2a55", height=46)
+                row_f.pack(fill="x")
+                row_f.pack_propagate(False)
+
+                shown = name if len(name) <= 28 else name[:27] + "\u2026"
+                tk.Label(row_f, text=shown + ("  \u26d4" if banned else ""),
+                         font=theme.font(11, "bold"),
+                         fg=theme.RED_ACCENT if banned else "white", bg="#1c2a55",
+                         anchor="w").place(x=10, y=5, width=270, height=18)
+                tk.Label(row_f, text=theme.role_label(p["role"]) + ("  \u00b7  BANNED" if banned else ""),
+                         font=theme.font(9), fg=theme.SOFT_BLUE, bg="#1c2a55",
+                         anchor="w").place(x=10, y=25, width=270, height=16)
+
+                def make_ban(u=uid, n=name, is_b=banned):
+                    def _ban():
+                        d = current_dept()
+                        try:
+                            if is_b:
+                                unban_in_department(u, d)
+                                msg = f"\u2713 {n} unbanned."
+                            else:
+                                if not messagebox.askyesno(
+                                        "Ban from Department",
+                                        f'Ban "{n}" from messaging in every room of this '
+                                        "department?", parent=dlg):
+                                    return
+                                ban_in_department(u, d, self.current_user_id)
+                                msg = f"\u2713 {n} banned from this department."
+                        except Exception as ex:
+                            say(f"Error: {ex}", ok=False)
+                            return
+                        load()
+                        say(msg)
+                    return _ban
+
+                def make_kick(u=uid, n=name):
+                    def _kick():
+                        d = current_dept()
+                        if not messagebox.askyesno(
+                                "Kick from Department",
+                                f'Remove "{n}" from every room in this department?\n\n'
+                                "If they host a room, it will have no host until you "
+                                "assign a new one.", parent=dlg):
+                            return
+                        try:
+                            count = kick_from_department(u, d)
+                        except Exception as ex:
+                            say(f"Error: {ex}", ok=False)
+                            return
+                        load()
+                        self.refresh_rooms()
+                        say(f"\u2713 {n} removed from {count} room(s).")
+                    return _kick
+
+                tk.Button(row_f, text="Unban" if banned else "Ban", font=theme.font(10, "bold"),
+                          fg="white", bg="#288c50" if banned else theme.WARN_ORANGE,
+                          relief="flat", bd=0, cursor="hand2",
+                          command=make_ban()).place(x=300, y=10, width=80, height=26)
+                tk.Button(row_f, text="Kick", font=theme.font(10, "bold"), fg="white",
+                          bg=theme.RED_ACCENT, relief="flat", bd=0, cursor="hand2",
+                          command=make_kick()).place(x=392, y=10, width=80, height=26)
+
+        cmb.bind("<<ComboboxSelected>>", load)
+        if ids:
+            cmb.current(0)
+        load()
+
+        self._ghost_button(dlg, "Close", dlg.destroy).place(x=220, y=480, width=120, height=28)
 
     # ── Helpers ──
     def _display_name(self):

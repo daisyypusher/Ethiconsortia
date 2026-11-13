@@ -119,69 +119,246 @@ def filter_message(original: str, room_id=None) -> FilterResult:
 
     return FilterResult(censored, flagged)
 
+def is_exempt_host(user_id: int, room_id: int) -> bool:
+    """True if the user hosts a room that has NO department. With no department there
+    are no administrators over it, so the host has full power and can't be banned."""
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM rooms WHERE room_id=%s AND host_id=%s "
+            "AND (department_id IS NULL OR department_id = '')",
+            (room_id, user_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception:
+        return False
 
-def record_warning(user_id: int) -> int:
-    """Records a warning for the user; bans them if MAX_WARNINGS reached.
-    Returns the current warn count after incrementing (-1 on DB error)."""
+def record_warning(user_id: int, room_id: int) -> int:
+    """Records a warning for the user IN THIS ROOM; bans them from the room
+    if MAX_WARNINGS is reached. Returns the warn count (-1 on DB error)."""
+    if is_exempt_host(user_id, room_id):
+        return 0
     try:
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO user_warnings (user_id, warn_count, is_banned)
-            VALUES (%s, 1, 0)
+            INSERT INTO room_warnings (user_id, room_id, warn_count)
+            VALUES (%s, %s, 1)
             ON DUPLICATE KEY UPDATE warn_count = warn_count + 1
             """,
-            (user_id,),
+            (user_id, room_id),
         )
-        cur.execute("SELECT warn_count FROM user_warnings WHERE user_id=%s", (user_id,))
+        cur.execute("SELECT warn_count FROM room_warnings WHERE user_id=%s AND room_id=%s",
+                    (user_id, room_id))
         row = cur.fetchone()
         count = row[0] if row else 1
         cur.close()
 
         if count >= MAX_WARNINGS:
-            ban_user(user_id)
+            ban_user(user_id, room_id)
         return count
     except Exception as ex:
         print(f"ModerationFilter.record_warning error: {ex}")
         return -1
 
 
-def ban_user(user_id: int):
-    """Marks user as banned in user_warnings and users tables."""
+def ban_user(user_id: int, room_id: int, banned_by=None):
+    """Bans the user from ONE room only."""
+    if is_exempt_host(user_id, room_id):
+        return
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("UPDATE user_warnings SET is_banned=1 WHERE user_id=%s", (user_id,))
-        cur.execute("UPDATE users SET is_banned=1 WHERE user_id=%s", (user_id,))
+        cur.execute("INSERT IGNORE INTO room_bans (room_id, user_id, banned_by) "
+                    "VALUES (%s, %s, %s)", (room_id, user_id, banned_by))
         cur.close()
     except Exception as ex:
         print(f"ModerationFilter.ban_user error: {ex}")
 
 
-def is_banned(user_id: int) -> bool:
+def unban_user_in_room(user_id: int, room_id: int) -> bool:
+    """Lifts the room ban and resets the warnings for that room.
+    Returns True if the user can now post (False if a department ban still applies)."""
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT is_banned FROM user_warnings WHERE user_id=%s", (user_id,))
+        cur.execute("DELETE FROM room_bans WHERE room_id=%s AND user_id=%s", (room_id, user_id))
+        cur.execute("DELETE FROM room_warnings WHERE room_id=%s AND user_id=%s", (room_id, user_id))
+        cur.close()
+    except Exception as ex:
+        print(f"ModerationFilter.unban_user_in_room error: {ex}")
+    return not is_banned(user_id, room_id)
+
+
+def is_banned(user_id: int, room_id: int) -> bool:
+    """True if the user is banned from this room, directly or through its department."""
+    if is_exempt_host(user_id, room_id):
+        return False
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT 1 FROM rooms r
+            WHERE r.room_id = %s
+              AND (EXISTS (SELECT 1 FROM room_bans b
+                           WHERE b.room_id = r.room_id AND b.user_id = %s)
+                   OR (r.department_id IS NOT NULL AND EXISTS (
+                           SELECT 1 FROM department_bans d
+                           WHERE d.department_id = r.department_id AND d.user_id = %s)))
+            """,
+            (room_id, user_id, user_id),
+        )
         row = cur.fetchone()
         cur.close()
-        return bool(row and row[0] == 1)
+        return row is not None
+    except Exception:
+        return False
+
+def is_department_banned(user_id: int, department_id) -> bool:
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM department_bans WHERE department_id=%s AND user_id=%s",
+                    (department_id, user_id))
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
     except Exception:
         return False
 
 
-def get_warn_count(user_id: int) -> int:
+def is_locked_out(user_id: int, room_id: int) -> bool:
+    """True if the user may not open this room at all: banned from its department,
+    or (for a host / admin) banned from the room itself. Students who are only
+    banned in a room are NOT locked out; they just can't send there."""
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("SELECT warn_count FROM user_warnings WHERE user_id=%s", (user_id,))
+        cur.execute(
+            """
+            SELECT 1 FROM rooms r
+            WHERE r.room_id = %s
+              AND ((r.department_id IS NOT NULL AND EXISTS (
+                        SELECT 1 FROM department_bans d
+                        WHERE d.department_id = r.department_id AND d.user_id = %s))
+                   OR (EXISTS (SELECT 1 FROM room_bans b
+                               WHERE b.room_id = r.room_id AND b.user_id = %s)
+                       AND ((r.host_id = %s AND r.department_id IS NOT NULL
+                             AND r.department_id <> '')
+                            OR EXISTS (SELECT 1 FROM users u
+                                       WHERE u.user_id = %s AND u.role = 'admin'))))
+            """,
+            (room_id, user_id, user_id, user_id, user_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row is not None
+    except Exception:
+        return False
+
+def get_warn_count(user_id: int, room_id: int) -> int:
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT warn_count FROM room_warnings WHERE user_id=%s AND room_id=%s",
+                    (user_id, room_id))
         row = cur.fetchone()
         cur.close()
         return row[0] if row else 0
     except Exception:
         return 0
 
+
+# ── Department-level moderation (used by the admin dashboard) ───────────────
+def get_admin_departments(admin_id: int) -> list:
+    """[(department_id, department_name)]: departments the admin joined,
+    plus departments of rooms they are a member of (minus any they are banned from)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT r.department_id, MAX(r.department_name)
+        FROM rooms r
+        WHERE r.department_id IS NOT NULL
+          AND (r.department_id IN (SELECT department_id FROM admin_departments WHERE user_id=%s)
+               OR r.room_id IN (SELECT room_id FROM room_members WHERE user_id=%s))
+          AND NOT EXISTS (SELECT 1 FROM department_bans b
+                          WHERE b.department_id = r.department_id AND b.user_id = %s)
+        GROUP BY r.department_id
+        ORDER BY r.department_id
+        """,
+        (admin_id, admin_id, admin_id),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+
+def get_department_people(department_id: str, admin_id: int) -> list:
+    """Admins and professors in a department (members of its rooms, admins who joined it,
+    or people currently banned from it). The calling admin is left out."""
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        """
+        SELECT u.user_id, u.full_name, u.username, u.role,
+               EXISTS(SELECT 1 FROM department_bans db
+                      WHERE db.department_id = %s AND db.user_id = u.user_id) AS is_banned
+        FROM users u
+        WHERE u.role IN ('professor', 'admin') AND u.user_id != %s
+          AND (u.user_id IN (SELECT rm.user_id FROM room_members rm
+                             JOIN rooms r ON r.room_id = rm.room_id
+                             WHERE r.department_id = %s)
+               OR u.user_id IN (SELECT user_id FROM admin_departments WHERE department_id = %s)
+               OR u.user_id IN (SELECT user_id FROM department_bans WHERE department_id = %s))
+        ORDER BY FIELD(u.role, 'admin', 'professor'), u.full_name ASC
+        """,
+        (department_id, admin_id, department_id, department_id, department_id),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+
+def ban_in_department(user_id: int, department_id: str, banned_by: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT IGNORE INTO department_bans (department_id, user_id, banned_by) "
+                "VALUES (%s, %s, %s)", (department_id, user_id, banned_by))
+    cur.close()
+
+
+def unban_in_department(user_id: int, department_id: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM department_bans WHERE department_id=%s AND user_id=%s",
+                (department_id, user_id))
+    cur.close()
+
+
+def kick_from_department(user_id: int, department_id: str) -> int:
+    """Removes the user from every room in the department. Returns how many rooms.
+    Rooms they hosted are left with no host (an admin assigns a new one)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE rm FROM room_members rm JOIN rooms r ON r.room_id = rm.room_id "
+        "WHERE r.department_id=%s AND rm.user_id=%s", (department_id, user_id))
+    removed = cur.rowcount
+    cur.execute(
+        "DELETE mr FROM room_member_roles mr JOIN rooms r ON r.room_id = mr.room_id "
+        "WHERE r.department_id=%s AND mr.user_id=%s", (department_id, user_id))
+    cur.execute("UPDATE rooms SET host_id=NULL WHERE department_id=%s AND host_id=%s",
+                (department_id, user_id))
+    cur.execute("DELETE FROM admin_departments WHERE department_id=%s AND user_id=%s",
+                (department_id, user_id))
+    cur.close()
+    return removed
 
 def log_flagged(user_id: int, room_msg_id, original: str, censored: str,
                 category: str = "filtered", sub_room_id=None):
@@ -295,10 +472,16 @@ def mark_alerts_read(admin_id: int, flag_ids):
 
 def show_warning_dialog(parent, warn_count: int):
     """Shows a styled warning / ban dialog."""
+    if warn_count <= 0:
+        messagebox.showwarning(
+            "Message not sent",
+            "Your message contained inappropriate language and was not sent.",
+            parent=parent)
+        return
     remaining = MAX_WARNINGS - warn_count
     if remaining <= 0:
         msg = (
-            "\u26d4 You have been BANNED\n\n"
+            "\u26d4 You have been BANNED from this room\n\n"
             f"You exceeded {MAX_WARNINGS} profanity warnings.\n"
             "Contact an administrator to appeal."
         )
@@ -308,6 +491,6 @@ def show_warning_dialog(parent, warn_count: int):
             f"\u26a0 Profanity Warning {warn_count}/{MAX_WARNINGS}\n\n"
             "Your message contained inappropriate language and was not sent.\n"
             "The host and administrators have been notified.\n"
-            f"You have {remaining} warning(s) left before being banned."
+            f"You have {remaining} warning(s) left before being banned from this room."
         )
         messagebox.showwarning("Warning", msg, parent=parent)

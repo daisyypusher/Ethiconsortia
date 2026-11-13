@@ -13,10 +13,10 @@ from tkinter import messagebox, simpledialog, ttk
 from db.connection import get_connection
 from ui import theme, emote_picker, image_message_handler as imh
 from ui.moderation_filter import (
-    filter_message, record_warning, show_warning_dialog, is_banned, log_flagged,
+    filter_message, record_warning, show_warning_dialog, is_banned, unban_user_in_room, is_locked_out, log_flagged,
     find_suspicious,
     count_unread_alerts, get_admin_flagged, mark_alerts_read,
-    add_filtered_word, remove_filtered_word,
+    add_filtered_word, remove_filtered_word, is_exempt_host,
 )
 
 EMOTES = [
@@ -48,6 +48,7 @@ TAG_COLORS = {
 }
 
 RESTRICTED_MSG = "You can't send messages in this sub-room."
+BANNED_MSG = "You are banned from this room."
 
 class RoomFrame(tk.Toplevel):
     def __init__(self, user_id, username, full_name, sys_role,
@@ -674,10 +675,14 @@ class RoomFrame(tk.Toplevel):
                           FROM room_member_roles mr
                           JOIN room_roles rr ON rr.role_id = mr.role_id
                          WHERE mr.user_id = u.user_id AND mr.room_id = %s) AS role_names,
-                       COALESCE(uw.is_banned, 0) AS is_banned
+                       (EXISTS (SELECT 1 FROM room_bans b
+                                 WHERE b.room_id = rm.room_id AND b.user_id = u.user_id)
+                        OR EXISTS (SELECT 1 FROM department_bans d
+                                    JOIN rooms rd ON rd.department_id = d.department_id
+                                   WHERE rd.room_id = rm.room_id AND d.user_id = u.user_id)
+                       ) AS is_banned
                 FROM room_members rm
                 JOIN users u ON rm.user_id = u.user_id
-                LEFT JOIN user_warnings uw ON uw.user_id = u.user_id
                 WHERE rm.room_id = %s
                 ORDER BY
                     FIELD(rm.room_role,'host','member'),
@@ -765,7 +770,8 @@ class RoomFrame(tk.Toplevel):
                             command=lambda: self.kick_member(uid, dname))
             kick.place(x=225, y=10, width=28, height=22)
 
-        if self.current_sys_role == "admin" and is_banned_u:
+        if is_banned_u and (self.current_sys_role == "admin"
+                            or is_exempt_host(self.current_user_id, self.room_id)):
             unban = tk.Button(row, text="\u21a9", font=theme.font(9, "bold"), fg="white",
                                bg="#288c50", relief="flat", bd=0, cursor="hand2",
                                command=lambda: self.unban_user(uid, dname))
@@ -912,17 +918,26 @@ class RoomFrame(tk.Toplevel):
         btn.place(x=80, y=340, width=200, height=38)
 
     def unban_user(self, uid, name):
-        if not messagebox.askyesno("Unban User", f'Unban "{name}" and reset their warnings?',
+        if (self.current_sys_role != "admin"
+                and not is_exempt_host(self.current_user_id, self.room_id)):
+            messagebox.showwarning("Not allowed",
+                                    "Only an administrator can unban people in this room.",
+                                    parent=self)
+            return
+        if not messagebox.askyesno("Unban User",
+                                    f'Unban "{name}" in this room and reset their warnings?',
                                     parent=self):
             return
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute("UPDATE user_warnings SET is_banned=0, warn_count=0 WHERE user_id=%s", (uid,))
-            cur.execute("UPDATE users SET is_banned=0 WHERE user_id=%s", (uid,))
-            cur.close()
-            messagebox.showinfo("Unbanned", f"{name} has been unbanned and warnings reset.",
-                                 parent=self)
+            if unban_user_in_room(uid, self.room_id):
+                messagebox.showinfo("Unbanned", f"{name} can message in this room again.",
+                                     parent=self)
+            else:
+                messagebox.showinfo(
+                    "Still banned",
+                    f"{name} is also banned from this room's whole department.\n"
+                    "Lift that from \U0001F465 Department Members on the dashboard.",
+                    parent=self)
             self.load_members()
         except Exception as ex:
             messagebox.showerror("Error", str(ex), parent=self)
@@ -1253,7 +1268,7 @@ class RoomFrame(tk.Toplevel):
             cur = conn.cursor(dictionary=True)
             cur.execute(
                 """
-                SELECT m.message_id, u.full_name, u.username, r.room_name
+                SELECT m.message_id, u.full_name, u.username, r.room_name, r.room_id
                 FROM room_messages m
                 JOIN users u ON u.user_id = m.sender_id
                 JOIN room_sub_rooms sr ON sr.sub_room_id = m.sub_room_id
@@ -1268,6 +1283,9 @@ class RoomFrame(tk.Toplevel):
         except Exception:
             return
         if not row or row["message_id"] <= self._last_dm_toast_id:
+            return
+        if (is_locked_out(self.current_user_id, row["room_id"])
+                or is_banned(self.current_user_id, row["room_id"])):
             return
         self._last_dm_toast_id = row["message_id"]
         self._show_toast(row["full_name"] or row["username"], row["room_name"])
@@ -1294,7 +1312,7 @@ class RoomFrame(tk.Toplevel):
 
     def prompt_other_label(self, message_id):
         """Asks for the required label when retagging a sent message as 'Other'."""
-        if is_banned(self.current_user_id):
+        if is_banned(self.current_user_id, self.room_id):
             return
         while True:
             label = simpledialog.askstring(
@@ -1320,7 +1338,7 @@ class RoomFrame(tk.Toplevel):
                         f"[tag label] {label}", f"[tag label] {fr.censored}",
                         category="suspicious" if suspicious else "filtered")
             if fr.was_flagged:
-                show_warning_dialog(self, record_warning(self.current_user_id))
+                show_warning_dialog(self, record_warning(self.current_user_id, self.room_id))
             else:
                 messagebox.showinfo("Tag not saved",
                                      "That label wasn't saved. A host or administrator may follow up with you.",
@@ -1403,7 +1421,7 @@ class RoomFrame(tk.Toplevel):
                     "The tag label can be at most 20 characters.", parent=self)
                 return
 
-        if is_banned(self.current_user_id):
+        if is_banned(self.current_user_id, self.room_id):
             messagebox.showerror(
                 "Banned",
                 "\u26d4 You are banned\n\nYou have been banned due to repeated profanity "
@@ -1432,9 +1450,9 @@ class RoomFrame(tk.Toplevel):
                 sub_room_id=self.selected_sub_room_id,
             )
             if filtered:
-                warn_count = record_warning(self.current_user_id)
+                warn_count = record_warning(self.current_user_id, self.room_id)
                 show_warning_dialog(self, warn_count)
-                if is_banned(self.current_user_id):
+                if is_banned(self.current_user_id, self.room_id):
                     self.txt_message.delete(0, tk.END)
                     self.txt_message.configure(fg="gray", state="disabled")
                     self.btn_send.configure(state="disabled")
@@ -1500,7 +1518,7 @@ class RoomFrame(tk.Toplevel):
             if not new_text:
                 status.configure(text="Message can't be empty.")
                 return
-            if is_banned(self.current_user_id):
+            if is_banned(self.current_user_id, self.room_id):
                 status.configure(text="You are banned and can't edit messages.")
                 return
 
@@ -1533,7 +1551,7 @@ class RoomFrame(tk.Toplevel):
                     log_flagged(self.current_user_id, message_id, new_text, fr.censored,
                                 category="suspicious" if suspicious else "filtered")
                     if fr.was_flagged:
-                        show_warning_dialog(dlg, record_warning(self.current_user_id))
+                        show_warning_dialog(dlg, record_warning(self.current_user_id, self.room_id))
                     else:
                         messagebox.showinfo(
                             "Edit not saved",
@@ -1604,6 +1622,9 @@ class RoomFrame(tk.Toplevel):
 
     def _check_can_post(self, upload=False):
         """Warns and returns False if the user can't send (or upload) in the selected sub-room."""
+        if is_banned(self.current_user_id, self.room_id):
+            messagebox.showwarning("Banned", "You are banned from this room.", parent=self)
+            return False
         if self.selected_is_private or self.current_sys_role == "admin":
             return True
         _r, can_send, can_upload = self.channel_perms(self.selected_sub_room_id)
@@ -1718,7 +1739,11 @@ class RoomFrame(tk.Toplevel):
         return True
 
     def apply_permissions_to_input(self):
-        if (self.selected_is_private or self.current_sys_role == "admin"
+        banned = is_banned(self.current_user_id, self.room_id)
+        lock_msg = BANNED_MSG if banned else RESTRICTED_MSG
+        if banned:
+            allowed = False
+        elif (self.selected_is_private or self.current_sys_role == "admin"
                 or self.selected_sub_room_id == -1):
             allowed = True
         else:
@@ -1727,14 +1752,14 @@ class RoomFrame(tk.Toplevel):
         self.btn_send.configure(state="normal" if allowed else "disabled")
         self.txt_message.configure(state="normal")
         if allowed:
-            if self.txt_message.get() == RESTRICTED_MSG:
+            if self.txt_message.get() in (RESTRICTED_MSG, BANNED_MSG):
                 self.txt_message.delete(0, tk.END)
                 self.txt_message.insert(0, "Type a message...")
                 self.txt_message.configure(fg="gray")
         else:
-            if self.txt_message.get() != RESTRICTED_MSG:
+            if self.txt_message.get() != lock_msg:
                 self.txt_message.delete(0, tk.END)
-                self.txt_message.insert(0, RESTRICTED_MSG)
+                self.txt_message.insert(0, lock_msg)
             self.txt_message.configure(fg="#a05050", state="disabled")
 
     # ═════════════════════════════════════════════════════════════════
@@ -2645,9 +2670,26 @@ class RoomFrame(tk.Toplevel):
                              "This room has been archived by its host.", parent=self)
         self.go_back()
         return True
+
+    def check_locked_out(self):
+        """Banned from this room (or its department): send them back to the lobby.
+        Returns True if this window was closed."""
+        if is_locked_out(self.current_user_id, self.room_id):
+            msg = ("You are banned from this room's department.\n"
+                   "An administrator must unban you first.")
+        elif is_banned(self.current_user_id, self.room_id):
+            msg = ("You are banned from this room.\n"
+                   "An administrator must unban you before you can enter it again.")
+        else:
+            return False
+        messagebox.showwarning("Banned", msg, parent=self)
+        self.go_back()
+        return True
     
     def start_polling(self):
         def tick():
+            if self.check_locked_out():
+                return
             if self.check_archived():
                 return
             self.load_sub_rooms()
