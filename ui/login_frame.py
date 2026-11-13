@@ -91,14 +91,18 @@ class LoginFrame(tk.Tk):
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
             cur.execute(
-                "SELECT user_id, username, full_name, role FROM users "
+                "SELECT user_id, username, full_name, role, is_banned FROM users "
                 "WHERE username=%s AND password=%s",
                 (username, password),
             )
             row = cur.fetchone()
             cur.close()
 
-            if row:
+            if row and row["is_banned"] == 1:
+                self.lbl_status.configure(
+                    text="\u26d4 Account banned. Contact an admin.",
+                    fg=theme.RED_ACCENT)
+            elif row:
                 # Show a brief success message before switching screens.
                 self.lbl_status.configure(text="Login successful!", fg="#2e7d32")
                 self.update_idletasks()
