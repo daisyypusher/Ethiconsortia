@@ -73,6 +73,7 @@ class RoomFrame(tk.Toplevel):
         self._img_refs = []  # keep PhotoImage references alive
         self._last_msg_sig = None       # what the chat currently shows
         self._last_members_sig = None   # what the members list currently shows
+        self._last_sr_sig = None        # what the sub-room sidebar currently shows
         self._last_dm_toast_id = 0      # newest DM already previewed
 
         self.title(f"Ethiconsortia  \u2014  {room_name}")
@@ -188,8 +189,7 @@ class RoomFrame(tk.Toplevel):
         return p
 
     def load_sub_rooms(self):
-        for w in self.sub_rooms_list_panel.winfo_children():
-            w.destroy()
+        # 1) fetch + work out what this user is allowed to see
         try:
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
@@ -206,61 +206,74 @@ class RoomFrame(tk.Toplevel):
             )
             rows = cur.fetchall()
             cur.close()
-
-            first = True
-            last_section = ""
             readable = self._readable_sub_room_ids()
-
-            for r in rows:
-                sr_id, sr_name, sr_type = r["sub_room_id"], r["sub_room_name"], r["sub_room_type"]
-                detail = r["sub_room_type_detail"]
-                dm_a, dm_b = r["dm_user_a"], r["dm_user_b"]
-                is_private = detail == "private"
-                full_name = sr_name   # what the chat header shows
-                if not is_private and readable is not None and sr_id not in readable:
-                    continue
-
-                if is_private:
-                    is_participant = dm_a == self.current_user_id or dm_b == self.current_user_id
-                    is_admin = self.current_sys_role == "admin"
-                    if not is_participant and not is_admin:
-                        continue
-
-                    a_name = r["dm_a_name"] or "?"
-                    b_name = r["dm_b_name"] or "?"
-                    if is_participant:
-                        partner = b_name if dm_a == self.current_user_id else a_name
-                        full_name = f"DM-{partner}"
-                        sr_name = full_name
-                    else:
-                        full_name = f"DM-{a_name} \u2194 {b_name}"
-                        sr_name = f"DM-{a_name.split(' ')[0]} \u2194 {b_name.split(' ')[0]}"
-                    if len(sr_name) > 24:
-                        sr_name = sr_name[:23] + "\u2026"
-
-                section = "DM" if is_private else "PUBLIC"
-                if section != last_section:
-                    sec_lbl = tk.Label(
-                        self.sub_rooms_list_panel,
-                        text="\u2014 PRIVATE MESSAGES" if is_private else "\u2014 CHANNELS",
-                        font=theme.font(10, "bold"), fg="#8ca5d2", bg=theme.SUB_ROOM_BG,
-                        anchor="w")
-                    sec_lbl.pack(fill="x", padx=10, pady=(8, 2))
-                    last_section = section
-
-                dm_partner_id = -1
-                if is_private:
-                    dm_partner_id = dm_b if dm_a == self.current_user_id else dm_a
-
-                row_widget = self._build_sub_room_row(sr_id, sr_name, sr_type, is_private,
-                                                       dm_partner_id, full_name)
-                row_widget.pack(fill="x")
-                if first:
-                    self.select_sub_room(sr_id, full_name, is_private, dm_partner_id)
-                    first = False
-
         except Exception as ex:
             print(f"load_sub_rooms error: {ex}")
+            return
+
+        items = []   # (sr_id, shown_name, sr_type, is_private, dm_partner_id, full_name)
+        for r in rows:
+            sr_id, sr_name, sr_type = r["sub_room_id"], r["sub_room_name"], r["sub_room_type"]
+            is_private = r["sub_room_type_detail"] == "private"
+            dm_a, dm_b = r["dm_user_a"], r["dm_user_b"]
+            full_name = sr_name   # what the chat header shows
+            if not is_private and readable is not None and sr_id not in readable:
+                continue
+
+            dm_partner_id = -1
+            if is_private:
+                is_participant = dm_a == self.current_user_id or dm_b == self.current_user_id
+                if not is_participant and self.current_sys_role != "admin":
+                    continue
+                a_name = r["dm_a_name"] or "?"
+                b_name = r["dm_b_name"] or "?"
+                if is_participant:
+                    partner = b_name if dm_a == self.current_user_id else a_name
+                    full_name = f"DM-{partner}"
+                    sr_name = full_name
+                    dm_partner_id = dm_b if dm_a == self.current_user_id else dm_a
+                else:
+                    full_name = f"DM-{a_name} \u2194 {b_name}"
+                    sr_name = f"DM-{a_name.split(' ')[0]} \u2194 {b_name.split(' ')[0]}"
+                if len(sr_name) > 24:
+                    sr_name = sr_name[:23] + "\u2026"
+
+            items.append((sr_id, sr_name, sr_type, is_private, dm_partner_id, full_name))
+
+        # 2) nothing changed -> leave the sidebar alone (no flicker, no selection reset)
+        sig = tuple(items)
+        if sig == self._last_sr_sig:
+            return
+        self._last_sr_sig = sig
+
+        # 3) rebuild
+        for w in self.sub_rooms_list_panel.winfo_children():
+            w.destroy()
+
+        last_section = ""
+        for sr_id, sr_name, sr_type, is_private, dm_partner_id, full_name in items:
+            section = "DM" if is_private else "PUBLIC"
+            if section != last_section:
+                tk.Label(
+                    self.sub_rooms_list_panel,
+                    text="\u2014 PRIVATE MESSAGES" if is_private else "\u2014 CHANNELS",
+                    font=theme.font(10, "bold"), fg="#8ca5d2", bg=theme.SUB_ROOM_BG,
+                    anchor="w").pack(fill="x", padx=10, pady=(8, 2))
+                last_section = section
+            self._build_sub_room_row(sr_id, sr_name, sr_type, is_private,
+                                      dm_partner_id, full_name).pack(fill="x")
+
+        # 4) only jump to the first sub-room if the current one isn't available anymore
+        visible_ids = {i[0] for i in items}
+        if items and self.selected_sub_room_id not in visible_ids:
+            first = items[0]
+            self.select_sub_room(first[0], first[5], first[3], first[4])
+        elif not items:
+            self.selected_sub_room_id = -1
+            self.lbl_sub_room_header.configure(text="# Select a sub-room")
+            for cw in self.chat_messages_panel.winfo_children():
+                cw.destroy()
+            self._last_msg_sig = None
 
     def _build_sub_room_row(self, ch_id, ch_name, ch_type, is_private, dm_partner_id,
                             full_name=None):
@@ -1996,11 +2009,12 @@ class RoomFrame(tk.Toplevel):
 
             def do_toggle_archive():
                 if not is_arch:
-                    if not messagebox.askyesno(
+                     if not messagebox.askyesno(
                             "Archive Room",
                             f'Archive "{self.room_name}"?\n\nMembers will no longer see it in '
                             "their dashboard. You and administrators can still open it and "
-                            "restore it later.", parent=dlg):
+                            "restore it later from the \U0001F4E6 Archived button at the "
+                            "bottom left of the lobby.", parent=dlg):
                         return
                 if not self.set_room_archived(not is_arch):
                     messagebox.showwarning("Not allowed",
@@ -2636,15 +2650,16 @@ class RoomFrame(tk.Toplevel):
         def tick():
             if self.check_archived():
                 return
+            self.load_sub_rooms()
             if self.selected_sub_room_id != -1:
                 self.refresh_messages()
             self.load_members()
             self.apply_permissions_to_input()
             self.check_dm_preview()
             self.check_admin_alerts()
-            self._polling_job = self.after(2500, tick)
+            self._polling_job = self.after(1500, tick)
 
-        self._polling_job = self.after(2500, tick)
+        self._polling_job = self.after(1500, tick)
 
     def stop_polling(self):
         if self._polling_job is not None:

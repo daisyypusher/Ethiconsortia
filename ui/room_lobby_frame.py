@@ -54,7 +54,12 @@ class RoomLobbyFrame(tk.Tk):
         # ── Left sidebar (room quick icons) ──
         self.sidebar = tk.Frame(main, bg=theme.DARKER_NAVY)
         self.sidebar.place(x=0, y=55, width=72, height=585)
-
+        
+        # ── Archived rooms button (bottom-left, only shown when there is something to see) ──
+        self.btn_archived = theme.make_button(
+            main, "\U0001F4E6\nArchived", "#28376e", font_size=9, emoji=True,
+            command=self.show_archived_rooms_dialog)
+        
         # ── Main content ──
         content = tk.Frame(main, bg=theme.DARK_NAVY)
         content.place(x=72, y=55, width=888, height=585)
@@ -148,14 +153,24 @@ class RoomLobbyFrame(tk.Tk):
                 WHERE (rm.user_id IS NOT NULL
                        OR r.department_id IN (
                             SELECT department_id FROM admin_departments WHERE user_id = %s))
-                  AND (r.is_archived = 0 OR rm.room_role = 'host' OR %s = 1)
+                  AND r.is_archived = 0
                 ORDER BY r.created_at ASC
                 """,
-                (self.current_user_id, self.current_user_id,
-                 1 if self.current_role == "admin" else 0),
+                (self.current_user_id, self.current_user_id),
             )
             rows = cur.fetchall()
             cur.close()
+
+            # show the bottom-left button only if this host/admin has archived rooms
+            try:
+                n_arch = len(self._fetch_archived_rooms())
+            except Exception:
+                n_arch = 0
+            if n_arch:
+                self.btn_archived.configure(text=f"\U0001F4E6 {n_arch}\nArchived")
+                self.btn_archived.place(x=4, y=588, width=64, height=44)
+            else:
+                self.btn_archived.place_forget()
 
             side_y = 15
             col, row = 0, 0
@@ -164,8 +179,6 @@ class RoomLobbyFrame(tk.Tk):
             for r in rows:
                 effective_role = r["room_role"]
                 desc = r["description"]
-                if r["is_archived"]:
-                    desc = "\U0001F4E6 ARCHIVED" + (f" \u2014 {desc}" if desc else "")
 
                 card = self._build_room_card(r["room_id"], r["room_name"], desc,
                                               effective_role, r["invite_code"], r["host_id"])
@@ -692,6 +705,126 @@ class RoomLobbyFrame(tk.Tk):
                       command=make_open()).place(x=340, y=10, width=68, height=26)
 
         self._ghost_button(dlg, "Close", dlg.destroy).place(x=170, y=318, width=120, height=28)
+
+    # ── Archived rooms (host / admin) ──
+    def _fetch_archived_rooms(self):
+        """Archived rooms this user may restore: rooms they host, plus (admins)
+        rooms they belong to or that are in their departments."""
+        uid = self.current_user_id
+        is_admin = 1 if self.current_role == "admin" else 0
+        conn = get_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT r.room_id, r.room_name, r.host_id, r.archived_at,
+                   COALESCE(rm.room_role, 'member') AS room_role
+            FROM rooms r
+            LEFT JOIN room_members rm ON rm.room_id = r.room_id AND rm.user_id = %s
+            WHERE r.is_archived = 1
+              AND (r.host_id = %s
+                   OR (%s = 1 AND (rm.user_id IS NOT NULL
+                        OR r.department_id IN (
+                            SELECT department_id FROM admin_departments WHERE user_id = %s))))
+            ORDER BY r.archived_at DESC
+            """,
+            (uid, uid, is_admin, uid),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return rows
+
+    def show_archived_rooms_dialog(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("Archived Rooms")
+        dlg.geometry("500x420")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg=theme.ROOMS_BG)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="Archived Rooms", font=theme.font(16, "bold"), fg="white",
+                 bg=theme.ROOMS_BG, anchor="w").place(x=20, y=15, width=460, height=26)
+        tk.Label(dlg, text="Tick the rooms you want to restore to your dashboard.",
+                 font=theme.font(10, slant="italic"), fg=theme.SOFT_BLUE, bg=theme.ROOMS_BG,
+                 anchor="w").place(x=20, y=43, width=460, height=16)
+
+        list_panel = tk.Frame(dlg, bg="#1c2a55", highlightthickness=1,
+                               highlightbackground=theme.MEDIUM_BLUE)
+        list_panel.place(x=20, y=70, width=460, height=250)
+
+        lbl_status = tk.Label(dlg, text="", font=theme.font(11, "bold"), bg=theme.ROOMS_BG,
+                               anchor="center")
+        lbl_status.place(x=20, y=326, width=460, height=18)
+
+        checks = []   # (room_id, BooleanVar)
+
+        def load():
+            for w in list_panel.winfo_children():
+                w.destroy()
+            checks.clear()
+            try:
+                rows = self._fetch_archived_rooms()
+            except Exception as ex:
+                tk.Label(list_panel, text=f"DB Error: {ex}", font=theme.font(10),
+                         fg=theme.RED_ACCENT, bg="#1c2a55", wraplength=430).pack(pady=20)
+                return
+            if not rows:
+                tk.Label(list_panel, text="No archived rooms.",
+                         font=theme.font(12, slant="italic"), fg="#78a0c8",
+                         bg="#1c2a55").pack(pady=90)
+                return
+            for r in rows:
+                var = tk.BooleanVar(value=False)
+                checks.append((r["room_id"], var))
+                row_f = tk.Frame(list_panel, bg="#1c2a55", height=40)
+                row_f.pack(fill="x")
+                row_f.pack_propagate(False)
+                tk.Checkbutton(row_f, variable=var, bg="#1c2a55", selectcolor="#1c2a55",
+                               activebackground="#1c2a55").place(x=6, y=8, width=24, height=24)
+                name = r["room_name"]
+                shown = name if len(name) <= 30 else name[:29] + "\u2026"
+                tk.Label(row_f, text=shown, font=theme.font(12), fg="white", bg="#1c2a55",
+                         anchor="w").place(x=36, y=10, width=320, height=20)
+
+                def make_open(rr=r):
+                    def _open():
+                        dlg.destroy()
+                        self.enter_room(rr["room_id"], rr["room_name"],
+                                        rr["room_role"], rr["host_id"])
+                    return _open
+
+                tk.Button(row_f, text="Open", font=theme.font(10, "bold"), fg="white",
+                          bg=theme.MEDIUM_BLUE, relief="flat", bd=0, cursor="hand2",
+                          command=make_open()).place(x=390, y=8, width=56, height=24)
+
+        def do_restore():
+            ids = [rid for rid, v in checks if v.get()]
+            if not ids:
+                lbl_status.configure(fg="#ff8080", text="Tick at least one room.")
+                return
+            is_admin = 1 if self.current_role == "admin" else 0
+            try:
+                conn = get_connection()
+                cur = conn.cursor()
+                for rid in ids:
+                    cur.execute(
+                        "UPDATE rooms SET is_archived=0, archived_at=NULL "
+                        "WHERE room_id=%s AND (host_id=%s OR %s=1)",
+                        (rid, self.current_user_id, is_admin),
+                    )
+                cur.close()
+            except Exception as ex:
+                lbl_status.configure(fg="#ff8080", text=f"Error: {ex}")
+                return
+            load()
+            self.refresh_rooms()
+            lbl_status.configure(fg="#50d250", text=f"\u2713 Restored {len(ids)} room(s).")
+
+        theme.make_button(dlg, "Restore Selected", theme.GREEN_BTN, font_size=12,
+                          command=do_restore).place(x=100, y=352, width=300, height=38)
+        self._ghost_button(dlg, "Close", dlg.destroy).place(x=190, y=394, width=120, height=22)
+
+        load()
 
     # ── Enter room ──
     def enter_room(self, room_id, room_name, room_role, host_id, open_sub_room_id=None):
