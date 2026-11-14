@@ -47,7 +47,7 @@ def scale_image(img: Image.Image, max_px: int) -> Image.Image:
 
 def file_to_base64_raw(path: str) -> str:
     """Reads raw file bytes (no re-encode) and returns Base64 text —
-    matches the 'mime|base64' storage format used by ChatFrame/RoomFrame."""
+    matches the 'mime|base64' storage format used by RoomFrame."""
     with open(path, "rb") as f:
         data = f.read()
     return base64.b64encode(data).decode("ascii")
