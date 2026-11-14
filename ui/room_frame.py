@@ -637,7 +637,18 @@ class RoomFrame(tk.Toplevel):
             cur.close()
             self.refresh_messages()
         except Exception as ex:
-            messagebox.showerror("Error", f"Error sending file: {ex}", parent=self)
+            # 1153 = packet too large; 2006/2013 = server dropped the connection,
+            # which MySQL sometimes does instead when a packet is too big
+            if (getattr(ex, "errno", None) in (1153, 2006, 2013)
+                    or "max_allowed_packet" in str(ex)):
+                messagebox.showerror(
+                    "File Too Large for the Server",
+                    "The database rejected this file because it is bigger than the "
+                    "server's packet limit (or the connection dropped while sending).\n\n"
+                    "Try a smaller file, or ask whoever runs the database to raise "
+                    "max_allowed_packet.", parent=self)
+            else:
+                messagebox.showerror("Error", f"Error sending file: {ex}", parent=self)
 
     # ═════════════════════════════════════════════════════════════════
     #  MEMBERS SIDEBAR
