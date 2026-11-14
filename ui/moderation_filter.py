@@ -263,19 +263,6 @@ def is_locked_out(user_id: int, room_id: int) -> bool:
     except Exception:
         return False
 
-def get_warn_count(user_id: int, room_id: int) -> int:
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT warn_count FROM room_warnings WHERE user_id=%s AND room_id=%s",
-                    (user_id, room_id))
-        row = cur.fetchone()
-        cur.close()
-        return row[0] if row else 0
-    except Exception:
-        return 0
-
-
 # ── Department-level moderation (used by the admin dashboard) ───────────────
 def get_admin_departments(admin_id: int) -> list:
     """[(department_id, department_name)]: departments the admin joined,

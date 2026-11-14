@@ -19,17 +19,6 @@ from ui.moderation_filter import (
     add_filtered_word, remove_filtered_word, is_exempt_host,
 )
 
-EMOTES = [
-    ["\U0001F60A", "\U0001F602", "\U0001F60D", "\U0001F97A", "\U0001F60E",
-     "\U0001F62D", "\U0001F624", "\U0001F914", "\U0001F605", "\U0001F973"],
-    ["\U0001F44D", "\U0001F44E", "\U0001F44F", "\U0001F64C", "\U0001F91D",
-     "\U0001F44B", "\U0001F926", "\U0001F937", "\U0001F4AA", "\U0001FAC2"],
-    ["\u2764\uFE0F", "\U0001F494", "\U0001F525", "\u2728", "\U0001F4AF",
-     "\U0001F389", "\u2B50", "\U0001F480", "\U0001FAE1", "\U0001F64F"],
-    ["\U0001F4DA", "\U0001F4BB", "\U0001F4DD", "\U0001F393", "\U0001F4E2",
-     "\U0001F3C6", "\u23F0", "\U0001F4CC", "\U0001F4A1", "\U0001F680"],
-]
-
 TAG_LABELS = {
     "none":         "No tag",
     "announcement": "\U0001F4E2 Announcement",
@@ -1831,8 +1820,7 @@ class RoomFrame(tk.Toplevel):
             cur.execute(
                 """
                 SELECT u.user_id, u.full_name, u.username, rm.room_role,
-                       rm.can_send_messages, rm.can_read_history, rm.can_manage_members,
-                       rm.can_post_announcements
+                       rm.can_send_messages, rm.can_read_history, rm.can_manage_members
                 FROM room_members rm
                 JOIN users u ON u.user_id = rm.user_id
                 WHERE rm.room_id = %s AND (rm.room_role != 'host' OR %s) AND u.role != 'admin'
@@ -2544,18 +2532,18 @@ class RoomFrame(tk.Toplevel):
     # ═════════════════════════════════════════════════════════════════
     #  PERMISSION HELPERS
     # ═════════════════════════════════════════════════════════════════
-    def save_member_perms(self, user_id, can_send, can_read, can_manage, can_post_announce=False):
+    def save_member_perms(self, user_id, can_send, can_read, can_manage):
         # only an admin may change a host's permissions; everyone else is limited to non-hosts
         try:
             conn = get_connection()
             cur = conn.cursor()
             sql = ("UPDATE room_members SET can_send_messages=%s, can_read_history=%s, "
-                   "can_manage_members=%s, can_post_announcements=%s "
+                   "can_manage_members=%s "
                    "WHERE room_id=%s AND user_id=%s")
             if not self.is_admin_here:
                 sql += " AND room_role != 'host'"
             cur.execute(sql, (int(can_send), int(can_read), int(can_manage),
-                              int(can_post_announce), self.room_id, user_id))
+                              self.room_id, user_id))
             cur.close()
         except Exception as ex:
             print(f"save_member_perms error: {ex}")

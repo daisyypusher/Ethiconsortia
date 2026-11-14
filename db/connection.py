@@ -45,11 +45,3 @@ def get_connection():
             print(f"\u274c Connection failed: {e}")
             _connection = None
     return _connection
-
-
-def cursor(dictionary=True):
-    """Convenience helper: returns a cursor off the shared connection."""
-    conn = get_connection()
-    if conn is None:
-        raise MySQLError("No database connection available.")
-    return conn.cursor(dictionary=dictionary)

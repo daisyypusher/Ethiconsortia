@@ -31,7 +31,6 @@ SUB_ROOM_BG = "#233260"
 DM_COLOR = "#500078"
 DM_BADGE_BG = "#6e28b4"
 
-FONT_FAMILY = "Segoe UI" if tk._default_root is None else "Segoe UI"
 EMOJI_FONT_FAMILY = "Segoe UI Emoji"
 
 

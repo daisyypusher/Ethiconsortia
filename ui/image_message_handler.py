@@ -14,7 +14,6 @@ import tempfile
 
 from PIL import Image, ImageChops, ImageDraw, ImageTk
 
-MAX_PREVIEW_PX = 320
 MAX_BYTES = 5 * 1024 * 1024
 ACCEPT_EXT = [("Image files", "*.jpg *.jpeg *.png *.gif *.bmp *.webp")]
 MAX_ATTACH_BYTES = 10 * 1024 * 1024  # 10 MB for any file/video
@@ -46,34 +45,12 @@ def scale_image(img: Image.Image, max_px: int) -> Image.Image:
     new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
     return img.resize(new_size, Image.LANCZOS)
 
-
-def file_to_base64(path: str) -> str:
-    """Reads an image file, scales it, and returns Base64-encoded PNG bytes."""
-    img = Image.open(path).convert("RGBA")
-    scaled = scale_image(img, MAX_PREVIEW_PX)
-    buf = io.BytesIO()
-    scaled.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
 def file_to_base64_raw(path: str) -> str:
     """Reads raw file bytes (no re-encode) and returns Base64 text —
     matches the 'mime|base64' storage format used by ChatFrame/RoomFrame."""
     with open(path, "rb") as f:
         data = f.read()
     return base64.b64encode(data).decode("ascii")
-
-
-def guess_mime(path: str) -> str:
-    lower = path.lower()
-    if lower.endswith(".png"):
-        return "image/png"
-    if lower.endswith(".gif"):
-        return "image/gif"
-    if lower.endswith(".webp"):
-        return "image/webp"
-    return "image/jpeg"
-
 
 def decode_base64_image(b64_data: str):
     """Decodes a Base64 string (optionally 'mime|base64') to a PIL Image, or None."""
