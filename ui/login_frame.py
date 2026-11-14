@@ -3,6 +3,7 @@ ui/login_frame.py
 ─────────────────────────────────────────────────────────────
 """
 import tkinter as tk
+import bcrypt
 
 from db.connection import get_connection
 from ui import theme
@@ -79,6 +80,13 @@ class LoginFrame(tk.Tk):
         from ui.register_frame import RegisterFrame
         RegisterFrame().mainloop()
 
+    @staticmethod
+    def _password_ok(password, stored):
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), stored.encode("ascii"))
+        except ValueError:
+            return False
+
     def handle_login(self):
         username = self.txt_username.get().strip()
         password = self.txt_password.get().strip()
@@ -91,14 +99,14 @@ class LoginFrame(tk.Tk):
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
             cur.execute(
-                "SELECT user_id, username, full_name, role FROM users "
-                "WHERE username=%s AND password=%s",
-                (username, password),
+                "SELECT user_id, username, full_name, role, password FROM users "
+                "WHERE username=%s",
+                (username,),
             )
             row = cur.fetchone()
             cur.close()
 
-            if row:
+            if row and self._password_ok(password, row["password"]):
                 # Show a brief success message before switching screens.
                 self.lbl_status.configure(text="Login successful!", fg="#2e7d32")
                 self.update_idletasks()

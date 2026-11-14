@@ -3,6 +3,7 @@ ui/register_frame.py
 ─────────────────────────────────────────────────────────────
 """
 import tkinter as tk
+import bcrypt
 from tkinter import ttk
 
 from db.connection import get_connection
@@ -152,6 +153,9 @@ class RegisterFrame(tk.Tk):
         if len(password) < 8:
             self.set_status("Password must be at least 8 characters.", theme.RED_ACCENT)
             return
+        if len(password.encode("utf-8")) > 72:
+            self.set_status("Password is too long (max 72 characters).", theme.RED_ACCENT)
+            return
         if password != confirm:
             self.set_status("Passwords do not match.", theme.RED_ACCENT)
             return
@@ -173,10 +177,11 @@ class RegisterFrame(tk.Tk):
             conn = get_connection()
             cur = conn.cursor()
             db_role = "admin" if role == "administrator" else role
+            pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
             cur.execute(
                 "INSERT INTO users (full_name, username, password, role) "
                 "VALUES (%s, %s, %s, %s)",
-                (full_name, username, password, db_role),
+                (full_name, username, pw_hash, db_role),
             )
             cur.close()
             self.set_status("Account created successfully!", theme.SUCCESS)
