@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageTk
 
 MAX_PREVIEW_PX = 320
 MAX_BYTES = 5 * 1024 * 1024
@@ -190,3 +190,30 @@ def save_attachment(parent, content: str):
     if dest:
         with open(dest, "wb") as f:
             f.write(data)
+
+def logo_to_base64(path: str, size: int = 128) -> str:
+    """Center-crops the image to a square, scales it to size x size and returns
+    Base64 PNG text (small enough to store in the rooms table)."""
+    img = Image.open(path).convert("RGBA")
+    w, h = img.size
+    side = min(w, h)
+    left, top = (w - side) // 2, (h - side) // 2
+    img = img.crop((left, top, left + side, top + side)).resize((size, size), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def make_logo_photo(b64_data: str, size: int, radius: int):
+    """Logo as a PhotoImage with rounded corners (radius = size/2 gives a circle).
+    Returns None if the data is broken. The caller MUST keep a reference."""
+    img = decode_base64_image(b64_data)
+    if img is None:
+        return None
+    img = img.resize((size, size), Image.LANCZOS)
+    mask = Image.new("L", (size * 4, size * 4), 0)      # 4x bigger -> smooth edges
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, size * 4 - 1, size * 4 - 1), radius=radius * 4, fill=255)
+    mask = mask.resize((size, size), Image.LANCZOS)
+    img.putalpha(ImageChops.multiply(img.getchannel("A"), mask))
+    return ImageTk.PhotoImage(img)

@@ -15,7 +15,7 @@ from ui import theme, emote_picker, image_message_handler as imh
 from ui.moderation_filter import (
     filter_message, record_warning, show_warning_dialog, is_banned, unban_user_in_room, is_locked_out, log_flagged,
     find_suspicious,
-    count_unread_alerts, get_admin_flagged, mark_alerts_read,
+    count_unread_alerts, show_flagged_viewer,
     add_filtered_word, remove_filtered_word, is_exempt_host,
 )
 
@@ -111,12 +111,10 @@ class RoomFrame(tk.Toplevel):
     def _build_server_bar(self, parent):
         p = tk.Frame(parent, bg=theme.DARKER_NAVY)
 
-        icon = theme.RoundedCanvas(p, width=46, height=46, bg=theme.DARKER_NAVY,
-                                    highlightthickness=0)
-        icon.place(x=10, y=12)
-        icon.rounded_rect(0, 0, 46, 46, radius=23, fill=theme.MEDIUM_BLUE, outline="")
-        icon.create_text(23, 23, text=self.room_name[0].upper(), fill="white",
-                          font=theme.font(22, "bold"))
+        self._server_icon = theme.RoundedCanvas(p, width=46, height=46, bg=theme.DARKER_NAVY,
+                                                 highlightthickness=0)
+        self._server_icon.place(x=10, y=12)
+        self.refresh_server_icon()
 
         tk.Frame(p, bg=theme.MEDIUM_BLUE, height=2).place(x=8, y=66, width=50, height=2)
 
@@ -1794,7 +1792,13 @@ class RoomFrame(tk.Toplevel):
         self._dlg_sep(dlg, 68)
 
         tk.Label(dlg, text=f"Invite Code:  {self._get_invite_code()}", font=theme.font(12, "bold"),
-                 fg="#78dc82", bg="#233260", anchor="w").place(x=20, y=78, width=520, height=20)
+                 fg="#78dc82", bg="#233260", anchor="w").place(x=20, y=78, width=300, height=20)
+        theme.make_button(dlg, "\U0001F5BC  Change Logo", theme.MEDIUM_BLUE, font_size=10,
+                          emoji=True, command=lambda: self.pick_room_logo(dlg)
+                          ).place(x=330, y=75, width=140, height=26)
+        theme.make_button(dlg, "Remove", "#28376e", font_size=10,
+                          command=lambda: self.remove_room_logo(dlg)
+                          ).place(x=476, y=75, width=64, height=26)
         self._dlg_sep(dlg, 108)
 
         tk.Label(dlg, text="Member Permissions", font=theme.font(13, "bold"), fg="white",
@@ -1999,10 +2003,11 @@ class RoomFrame(tk.Toplevel):
 
         self._dlg_sep(dlg, 470)
 
-        if self.is_admin_here:
+        if self.is_admin_here or self.my_room_role == "host":
             btn_flagged = theme.make_button(dlg, "\U0001F4CB View Flagged Messages",
                                              theme.WARN_ORANGE, font_size=10, emoji=True,
-                                             command=lambda: self.open_flagged_messages_viewer(dlg))
+                                             command=lambda: self.open_flagged_messages_viewer(
+                                                 dlg, room_only=True))
             btn_flagged.place(x=20, y=480, width=220, height=28)
 
         if self.my_room_role == "host" or self.is_admin_here:
@@ -2074,46 +2079,13 @@ class RoomFrame(tk.Toplevel):
         cb.var = var
         return cb
 
-    def open_flagged_messages_viewer(self, parent_dlg):
-        dlg = tk.Toplevel(parent_dlg)
-        dlg.title("\U0001F4CB Flagged Messages (Admin View)")
-        dlg.geometry("700x500")
-        dlg.transient(parent_dlg)
-        dlg.grab_set()
-        dlg.configure(bg="#19233c")
-
-        tk.Label(dlg, text="Flagged & Suspicious Messages  \u2014  your departments only",
-                 font=theme.font(13, "bold"), fg=theme.WARN_ORANGE, bg="#19233c",
-                 anchor="w").place(x=14, y=12, width=670, height=22)
-
-        cols = ("Room", "Sub-room", "Sender", "Type", "Original Message", "Status", "Time")
-        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=17)
-        for c, w in zip(cols, (70, 130, 70, 70, 100, 130, 98)):
-            tree.heading(c, text=c)
-            tree.column(c, width=w)
-        tree.tag_configure("unread", foreground=theme.RED_ACCENT)
-        tree.place(x=14, y=44, width=668, height=410)
-
-        try:
-            rows = get_admin_flagged(self.current_user_id, is_admin=self.is_admin_here)
-            for r in rows:
-                suspicious = r["category"] == "suspicious"
-                tree.insert("", tk.END, tags=("unread",) if r["is_unread"] else (), values=(
-                    r["room_name"],
-                    (f"DM-{r['dm_a_name']} \u2194 {r['dm_b_name']}"
-                     if r["sub_room_type_detail"] == "private" else r["sub_room_name"]),
-                    r["username"],
-                    "Suspicious" if suspicious else "Filtered",
-                    r["original"],
-                    "Held back",
-                    theme.fmt_datetime(r["flagged_at"]),
-                ))
-            # only now does it count as read, and only for this admin
-            mark_alerts_read(self.current_user_id,
-                             [r["id"] for r in rows if r["is_unread"]])
-            self.check_admin_alerts()
-        except Exception as ex:
-            messagebox.showerror("Error", str(ex), parent=dlg)
+    def open_flagged_messages_viewer(self, parent_dlg, room_only=False):
+        """room_only=False: everything this person monitors (header badge).
+        room_only=True: this room only (Room Settings button)."""
+        show_flagged_viewer(parent_dlg, self.current_user_id, self.current_sys_role,
+                            room_id=self.room_id if room_only else None,
+                            room_name=self.room_name if room_only else None,
+                            on_read=self.check_admin_alerts)
 
     # ═════════════════════════════════════════════════════════════════
     #  FILTERED WORDS (professor / admin)
@@ -2642,6 +2614,75 @@ class RoomFrame(tk.Toplevel):
     # ═════════════════════════════════════════════════════════════════
     #  POLLING
     # ═════════════════════════════════════════════════════════════════
+    # ── room logo ──
+    def _get_logo(self):
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT logo FROM rooms WHERE room_id=%s", (self.room_id,))
+            row = cur.fetchone()
+            cur.close()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    def refresh_server_icon(self):
+        theme.draw_room_icon(self._server_icon, self.room_name, self._get_logo(), 46, 23,
+                             font_size=22)
+
+    def check_logo(self):
+        """Redraws the left-bar icon when someone changed the logo."""
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT logo_updated FROM rooms WHERE room_id=%s", (self.room_id,))
+            row = cur.fetchone()
+            cur.close()
+        except Exception:
+            return
+        stamp = row[0] if row else None
+        if stamp != getattr(self, "_logo_stamp", "unset"):
+            self._logo_stamp = stamp
+            self.refresh_server_icon()
+
+    def set_room_logo(self, b64, parent_dlg):
+        """b64=None removes the logo. Host or admin only."""
+        if not self._is_host_or_admin():
+            messagebox.showwarning("Not allowed",
+                                    "Only the host or an administrator can change the logo.",
+                                    parent=parent_dlg)
+            return False
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            stamp = "NOW()" if b64 else "NULL"
+            cur.execute(f"UPDATE rooms SET logo=%s, logo_updated={stamp} WHERE room_id=%s",
+                        (b64, self.room_id))
+            cur.close()
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex), parent=parent_dlg)
+            return False
+        self.refresh_server_icon()
+        return True
+
+    def pick_room_logo(self, parent_dlg):
+        if not self._is_host_or_admin():
+            return
+        path = imh.choose_image_file(parent_dlg)
+        if not path:
+            return
+        try:
+            b64 = imh.logo_to_base64(path)
+        except Exception as ex:
+            messagebox.showerror("Error", f"Can't read that image: {ex}", parent=parent_dlg)
+            return
+        if self.set_room_logo(b64, parent_dlg):
+            messagebox.showinfo("Logo updated", "Room logo updated.", parent=parent_dlg)
+
+    def remove_room_logo(self, parent_dlg):
+        if self.set_room_logo(None, parent_dlg):
+            messagebox.showinfo("Logo removed", "Room logo removed.", parent=parent_dlg)
+
     def _room_is_archived(self):
         try:
             conn = get_connection()
@@ -2711,6 +2752,7 @@ class RoomFrame(tk.Toplevel):
             self.apply_permissions_to_input()
             self.check_dm_preview()
             self.check_admin_alerts()
+            self.check_logo()
             self._polling_job = self.after(1500, tick)
 
         self._polling_job = self.after(1500, tick)
@@ -2724,10 +2766,9 @@ class RoomFrame(tk.Toplevel):
             self._polling_job = None
 
     def check_admin_alerts(self):
-        is_admin = self.is_admin_here
-        if not is_admin and self.my_room_role != "host":
+        if not (self.is_admin_here or self.my_room_role == "host"):
             return
-        n = count_unread_alerts(self.current_user_id, is_admin)
+        n = count_unread_alerts(self.current_user_id, self.current_sys_role)
         if n:
             self.btn_alerts.configure(text=f"\u26A0 {n} new alert(s)")
             self.btn_alerts.place(x=445, y=10, width=140, height=28)

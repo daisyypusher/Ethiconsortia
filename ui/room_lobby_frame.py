@@ -7,11 +7,12 @@ from tkinter import messagebox, ttk
 import uuid
 
 from db.connection import get_connection
-from ui import theme
+from ui import theme, image_message_handler as imh
 from ui.moderation_filter import (
     get_admin_departments, get_department_people,
     ban_in_department, unban_in_department, kick_from_department,
     is_locked_out, is_department_banned, is_banned,
+    count_unread_alerts, show_flagged_viewer,
 )
 
 ROOM_FILTERS = {
@@ -90,6 +91,11 @@ class RoomLobbyFrame(tk.Tk):
             content, f"Filter: {ROOM_FILTERS['all']}  \u25BE", "#28376e", font_size=10,
             bold=False, command=self._show_filter_menu)
         self.btn_filter.place(x=654, y=107, width=190, height=24)
+
+        self.btn_flagged = theme.make_button(
+            content, "\U0001F4CB View Flagged Messages", theme.WARN_ORANGE, font_size=9,
+            emoji=True, command=self._open_flagged)
+        # placed by refresh_rooms, only for admins, professors and room hosts
 
         rooms_outer = tk.Frame(content, bg=theme.ROOMS_BG, highlightbackground=theme.MEDIUM_BLUE,
                                 highlightthickness=1)
@@ -182,9 +188,24 @@ class RoomLobbyFrame(tk.Tk):
         try:
             if self.state() != "withdrawn":
                 self.refresh_rooms()
+                self._update_flag_button()
             self.after(2000, self._poll_rooms)
         except tk.TclError:
             pass          # window was closed
+
+    def _open_flagged(self):
+        show_flagged_viewer(self, self.current_user_id, self.current_role,
+                            on_read=self._update_flag_button)
+
+    def _update_flag_button(self):
+        """Shows the unread count on the button and turns it red when there is any."""
+        try:
+            n = count_unread_alerts(self.current_user_id, self.current_role)
+            self.btn_flagged.configure(
+                text="\U0001F4CB View Flagged Messages" + (f" ({n})" if n else ""),
+                bg=theme.RED_ACCENT if n else theme.WARN_ORANGE)
+        except Exception as ex:
+            print(f"flag button error: {ex}")
 
     # ── Public refresh method (called by RoomFrame on back) ──
     def refresh_rooms(self):
@@ -194,7 +215,7 @@ class RoomLobbyFrame(tk.Tk):
             cur.execute(
                 """
                 SELECT r.room_id, r.room_name, r.description, r.host_id, r.invite_code,
-                       r.is_archived, r.department_id,
+                       r.is_archived, r.department_id, r.logo_updated,
                        COALESCE(rm.room_role, 'member') AS room_role
                 FROM rooms r
                 LEFT JOIN room_members rm
@@ -215,9 +236,19 @@ class RoomLobbyFrame(tk.Tk):
                 n_arch = len(self._fetch_archived_rooms())
             except Exception:
                 n_arch = 0
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM rooms WHERE host_id=%s LIMIT 1", (self.current_user_id,))
+            hosts_any = cur.fetchone() is not None
+            cur.close()
         except Exception as ex:
             print(f"Error loading rooms: {ex}")
             return
+
+        # flagged-messages button: admins, professors, and anyone who hosts a room
+        if self.current_role in ("admin", "professor") or hosts_any:
+            self.btn_flagged.place(x=450, y=107, width=196, height=24)
+        else:
+            self.btn_flagged.place_forget()
 
         # the filter button decides which rooms show (dashboard and sidebar)
         flt = self._room_filter
@@ -257,13 +288,14 @@ class RoomLobbyFrame(tk.Tk):
 
         side_y = 15
         for col, r in enumerate(rows):
+            logo = self._load_logo(r["room_id"]) if r["logo_updated"] else None
             card = self._build_room_card(r["room_id"], r["room_name"], r["description"],
                                           r["room_role"], r["invite_code"], r["host_id"],
-                                          r["department_id"])
+                                          r["department_id"], logo)
             card.grid(row=0, column=col, padx=7, pady=7)
 
             icon = self._build_sidebar_icon(r["room_name"], r["room_id"], r["room_name"],
-                                             r["room_role"], r["host_id"])
+                                             r["room_role"], r["host_id"], logo)
             icon.place(x=13, y=side_y, width=46, height=46)
             side_y += 58
 
@@ -271,7 +303,19 @@ class RoomLobbyFrame(tk.Tk):
         sep = tk.Frame(self.sidebar, bg=theme.MEDIUM_BLUE, height=3)
         sep.place(x=10, y=8, width=52, height=3)
 
-    def _build_room_card(self, r_id, name, desc, r_role, inv_code, host_id, dept_id=None):
+    def _load_logo(self, room_id):
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT logo FROM rooms WHERE room_id=%s", (room_id,))
+            row = cur.fetchone()
+            cur.close()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    def _build_room_card(self, r_id, name, desc, r_role, inv_code, host_id, dept_id=None,
+                         logo=None):
         card = tk.Frame(self.rooms_list_panel, width=190, height=200, bg=theme.ROOM_CARD_BG,
                          highlightbackground=theme.MEDIUM_BLUE, highlightthickness=1,
                          cursor="hand2")
@@ -280,9 +324,7 @@ class RoomLobbyFrame(tk.Tk):
         icon_canvas = theme.RoundedCanvas(card, width=60, height=60, bg=theme.ROOM_CARD_BG,
                                            highlightthickness=0)
         icon_canvas.place(x=65, y=14)
-        icon_canvas.rounded_rect(0, 0, 60, 60, radius=12, fill=theme.MEDIUM_BLUE, outline="")
-        icon_canvas.create_text(30, 30, text=name[0].upper(), fill="white",
-                                 font=theme.font(30, "bold"))
+        theme.draw_room_icon(icon_canvas, name, logo, 60, 30, font_size=30)
 
         display_name = (name[:20] + "\u2026") if len(name) > 20 else name
         tk.Label(card, text=display_name, font=theme.font(12, "bold"), fg="white",
@@ -319,19 +361,24 @@ class RoomLobbyFrame(tk.Tk):
 
         return card
 
-    def _build_sidebar_icon(self, first_letter, r_id, name, r_role, host_id):
+    def _build_sidebar_icon(self, first_letter, r_id, name, r_role, host_id, logo=None):
         canvas = theme.RoundedCanvas(self.sidebar, width=46, height=46, bg=theme.DARKER_NAVY,
                                       highlightthickness=0, cursor="hand2")
-        bg_color = {"c": "#324882"}
-        shape = canvas.rounded_rect(0, 0, 46, 46, radius=14, fill=bg_color["c"], outline="")
-        text = canvas.create_text(23, 23, text=first_letter[0].upper(), fill="white",
-                                   font=theme.font(18, "bold"))
+        shape = None
+        if logo:
+            theme.draw_room_icon(canvas, name, logo, 46, 23)
+        else:
+            shape = canvas.rounded_rect(0, 0, 46, 46, radius=23, fill="#324882", outline="")
+            canvas.create_text(23, 23, text=first_letter[0].upper(), fill="white",
+                               font=theme.font(18, "bold"))
 
         def on_enter(_e):
-            canvas.itemconfigure(shape, fill=theme.MEDIUM_BLUE)
+            if shape is not None:
+                canvas.itemconfigure(shape, fill=theme.MEDIUM_BLUE)
 
         def on_leave(_e):
-            canvas.itemconfigure(shape, fill=bg_color["c"])
+            if shape is not None:
+                canvas.itemconfigure(shape, fill="#324882")
 
         def on_click(_e):
             self.enter_room(r_id, name, r_role, host_id)
@@ -353,6 +400,40 @@ class RoomLobbyFrame(tk.Tk):
 
         tk.Label(dlg, text="Create a New Room", font=theme.font(16, "bold"), fg="white",
                  bg=theme.ROOMS_BG, anchor="w").place(x=20, y=15, width=380, height=26)
+
+        # round logo picker (top right): click = choose image, right-click = clear
+        logo_state = {"b64": None}
+        logo_canvas = theme.RoundedCanvas(dlg, width=52, height=52, bg=theme.ROOMS_BG,
+                                           highlightthickness=0, cursor="hand2")
+        logo_canvas.place(x=348, y=2)
+
+        def draw_logo():
+            if logo_state["b64"]:
+                theme.draw_room_icon(logo_canvas, "?", logo_state["b64"], 52, 26)
+            else:
+                logo_canvas.delete("all")
+                logo_canvas.circle(26, 26, 25, fill="#324882", outline=theme.SOFT_BLUE)
+                logo_canvas.create_text(26, 26, text="+ Logo", fill="white",
+                                        font=theme.font(9, "bold"))
+
+        def pick_logo(_e=None):
+            path = imh.choose_image_file(dlg)
+            if not path:
+                return
+            try:
+                logo_state["b64"] = imh.logo_to_base64(path)
+            except Exception as ex:
+                messagebox.showerror("Error", f"Can't read that image: {ex}", parent=dlg)
+                return
+            draw_logo()
+
+        def clear_logo(_e=None):
+            logo_state["b64"] = None
+            draw_logo()
+
+        logo_canvas.bind("<Button-1>", pick_logo)
+        logo_canvas.bind("<Button-3>", clear_logo)
+        draw_logo()
 
         self._dlg_label(dlg, "Room Name *", 20, 55)
         tf_name = self._dlg_field(dlg, 20, 76, 380)
@@ -412,7 +493,7 @@ class RoomLobbyFrame(tk.Tk):
                     return
 
             self._do_create_room(name=name, desc=desc, dept_name=dept_name,
-                                 dept_id=dept_id, dlg=dlg)
+                                 dept_id=dept_id, dlg=dlg, logo=logo_state["b64"])
 
         btn_ok = self._dialog_button(dlg, "Create Room", theme.MEDIUM_BLUE, do_create)
         btn_ok.place(x=100, y=352, width=220, height=40)
@@ -420,7 +501,7 @@ class RoomLobbyFrame(tk.Tk):
         btn_cancel = self._ghost_button(dlg, "Cancel", dlg.destroy)
         btn_cancel.place(x=150, y=400, width=120, height=26)
 
-    def _do_create_room(self, name, desc, dept_name, dept_id, dlg):
+    def _do_create_room(self, name, desc, dept_name, dept_id, dlg, logo=None):
         try:
             conn = get_connection()
             cur = conn.cursor()
@@ -431,8 +512,10 @@ class RoomLobbyFrame(tk.Tk):
 
             cur.execute(
                 "INSERT INTO rooms (room_name, description, host_id, invite_code, "
-                "department_name, department_id) VALUES (%s, %s, %s, %s, %s, %s)",
-                (name, desc, self.current_user_id, code, dept_name, dept_id),
+                "department_name, department_id, logo, logo_updated) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, "
+                + ("NOW()" if logo else "NULL") + ")",
+                (name, desc, self.current_user_id, code, dept_name, dept_id, logo),
             )
             room_id = cur.lastrowid
 

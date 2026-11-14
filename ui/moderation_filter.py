@@ -7,9 +7,11 @@ DB tables required (see ethiconsortia.sql):
 """
 import re
 from dataclasses import dataclass
-from tkinter import messagebox
+import tkinter as tk
+from tkinter import messagebox, ttk
 
 from db.connection import get_connection
+from ui import theme
 
 # ── Banned word list (extend freely) ────────────────────────────────────────
 BAD_WORDS = [
@@ -394,12 +396,22 @@ _ADMIN_SCOPE = """
                             WHERE rm2.user_id = %s AND r2.department_id IS NOT NULL))
 """
 
+def _scope_sql(role: str):
+    """(sql, number of %s). Table alias `r` = rooms.
+    admin     -> departments they monitor, plus rooms they host
+    professor -> rooms they host or joined
+    others    -> rooms they host"""
+    if role == "admin":
+        return f"({_ADMIN_SCOPE} OR r.host_id = %s)", 3
+    if role == "professor":
+        return ("(r.host_id = %s OR r.room_id IN "
+                "(SELECT room_id FROM room_members WHERE user_id = %s))"), 2
+    return "r.host_id = %s", 1
 
-def count_unread_alerts(user_id: int, is_admin: bool = True) -> int:
-    """Held-back messages this user hasn't opened yet.
-    Admins: their departments. Hosts: the rooms they host."""
-    scope = _ADMIN_SCOPE if is_admin else "r.host_id = %s"
-    n_scope = 2 if is_admin else 1
+
+def count_unread_alerts(user_id: int, role: str = "admin") -> int:
+    """Held-back messages this person has not opened yet, inside what they monitor."""
+    scope, n_scope = _scope_sql(role)
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -421,11 +433,14 @@ def count_unread_alerts(user_id: int, is_admin: bool = True) -> int:
         return 0
 
 
-def get_admin_flagged(user_id: int, limit: int = 200, is_admin: bool = True):
-    """Held-back messages for this admin's departments (or this host's rooms),
-    with per-user unread status."""
-    scope = _ADMIN_SCOPE if is_admin else "r.host_id = %s"
-    n_scope = 2 if is_admin else 1
+def get_admin_flagged(user_id: int, limit: int = 200, role: str = "admin", room_id=None):
+    """Held-back messages this person monitors, newest first, with per-user unread
+    status. room_id limits the list to one room."""
+    scope, n_scope = _scope_sql(role)
+    room_sql = " AND r.room_id = %s" if room_id is not None else ""
+    params = ((user_id,) * (n_scope + 1)
+              + ((room_id,) if room_id is not None else ())
+              + (limit,))
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     cur.execute(
@@ -442,16 +457,15 @@ def get_admin_flagged(user_id: int, limit: int = 200, is_admin: bool = True):
         LEFT JOIN users ub ON ub.user_id = s.dm_user_b
         JOIN rooms r ON r.room_id = s.room_id
         LEFT JOIN flagged_reads fr ON fr.flag_id = fm.id AND fr.admin_id = %s
-        WHERE {scope}
+        WHERE {scope}{room_sql}
         ORDER BY fm.flagged_at DESC
         LIMIT %s
         """,
-        (user_id,) * (n_scope + 1) + (limit,),
+        params,
     )
     rows = cur.fetchall()
     cur.close()
     return rows
-
 
 def mark_alerts_read(admin_id: int, flag_ids):
     """Marks the given flagged messages as read for this admin only."""
@@ -468,6 +482,60 @@ def mark_alerts_read(admin_id: int, flag_ids):
     except Exception as ex:
         print(f"ModerationFilter.mark_alerts_read error: {ex}")
 
+def show_flagged_viewer(parent, user_id: int, role: str, room_id=None,
+                        room_name=None, on_read=None):
+    """Flagged-message history window.
+    room_id=None   -> everything this person monitors (dashboard, alert badge)
+    room_id=<id>   -> that one room only (Room Settings)"""
+    dlg = tk.Toplevel(parent)
+    dlg.title("\U0001F4CB Flagged Messages" + (f" \u2014 {room_name}" if room_name else ""))
+    dlg.geometry("700x500")
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.configure(bg="#19233c")
+
+    if room_id is not None:
+        heading = f"Flagged messages  \u2014  {room_name}"
+    elif role == "admin":
+        heading = "Flagged messages  \u2014  your departments + rooms you host"
+    elif role == "professor":
+        heading = "Flagged messages  \u2014  rooms you joined"
+    else:
+        heading = "Flagged messages  \u2014  rooms you host"
+    tk.Label(dlg, text=heading, font=theme.font(12, "bold"), fg=theme.WARN_ORANGE,
+             bg="#19233c", anchor="w").place(x=14, y=12, width=670, height=22)
+
+    cols = ("Room", "Sub-room", "Sender", "Type", "Original Message", "Status", "Time")
+    tree = ttk.Treeview(dlg, columns=cols, show="headings", height=17)
+    for c, w in zip(cols, (80, 110, 75, 70, 145, 70, 118)):
+        tree.heading(c, text=c)
+        tree.column(c, width=w)
+    tree.tag_configure("unread", foreground=theme.RED_ACCENT)
+    tree.place(x=14, y=44, width=668, height=410)
+
+    try:
+        rows = get_admin_flagged(user_id, role=role, room_id=room_id)
+        for r in rows:
+            suspicious = r["category"] == "suspicious"
+            tree.insert("", tk.END, tags=("unread",) if r["is_unread"] else (), values=(
+                r["room_name"],
+                (f"DM-{r['dm_a_name']} \u2194 {r['dm_b_name']}"
+                 if r["sub_room_type_detail"] == "private" else r["sub_room_name"]),
+                r["username"],
+                "Suspicious" if suspicious else "Filtered",
+                r["original"],
+                "Held back",
+                theme.fmt_datetime(r["flagged_at"]),
+            ))
+        if not rows:
+            tk.Label(dlg, text="No flagged messages.", font=theme.font(12, slant="italic"),
+                     fg="#78a0c8", bg="#19233c").place(x=14, y=460, width=668, height=22)
+        # only now does it count as read, and only for this person
+        mark_alerts_read(user_id, [r["id"] for r in rows if r["is_unread"]])
+        if on_read:
+            on_read()
+    except Exception as ex:
+        messagebox.showerror("Error", str(ex), parent=dlg)
 
 def show_warning_dialog(parent, warn_count: int):
     """Shows a styled warning / ban dialog."""

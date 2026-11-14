@@ -164,6 +164,21 @@ class RoundedCanvas(tk.Canvas):
     def circle(self, cx, cy, r, **kwargs):
         return self.create_oval(cx - r, cy - r, cx + r, cy + r, **kwargs)
 
+def draw_room_icon(canvas, name, logo_b64, size, radius, font_size=18):
+    """Draws a room's logo on a RoundedCanvas. No logo (or a broken one) -> the
+    coloured tile with the first letter of the room name."""
+    canvas.delete("all")
+    photo = None
+    if logo_b64:
+        from ui import image_message_handler as imh
+        photo = imh.make_logo_photo(logo_b64, size, radius)
+    if photo:
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas._logo_ref = photo        # Tk drops the image if nothing holds it
+    else:
+        canvas.rounded_rect(0, 0, size, size, radius=radius, fill=MEDIUM_BLUE, outline="")
+        canvas.create_text(size // 2, size // 2, text=name[0].upper(), fill="white",
+                           font=font(font_size, "bold"))
 
 def role_badge(role):
     return {"professor": "[Professor]", "admin": "[Admin]"}.get(role, "[Student]")
