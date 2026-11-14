@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Nov 14, 2026 at 05:47 PM
+-- Generation Time: Nov 14, 2026 at 11:28 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -92,23 +92,6 @@ CREATE TABLE `flagged_reads` (
 -- --------------------------------------------------------
 
 --
--- Table structure for table `messages`
---
-
-CREATE TABLE `messages` (
-  `message_id` int(11) NOT NULL,
-  `sender_id` int(11) NOT NULL,
-  `receiver_id` int(11) NOT NULL,
-  `content` text NOT NULL,
-  `sent_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `is_read` tinyint(4) DEFAULT 0,
-  `msg_type` varchar(10) NOT NULL DEFAULT 'text',
-  `image_data` mediumtext DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
 -- Table structure for table `message_edits`
 --
 
@@ -169,8 +152,7 @@ CREATE TABLE `room_members` (
   `joined_at` timestamp NOT NULL DEFAULT current_timestamp(),
   `can_send_messages` tinyint(1) NOT NULL DEFAULT 1,
   `can_read_history` tinyint(1) NOT NULL DEFAULT 1,
-  `can_manage_members` tinyint(1) NOT NULL DEFAULT 0,
-  `can_post_announcements` tinyint(1) NOT NULL DEFAULT 0
+  `can_manage_members` tinyint(1) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
@@ -205,21 +187,6 @@ CREATE TABLE `room_messages` (
   `msg_tag` varchar(20) NOT NULL DEFAULT 'none',
   `msg_tag_label` varchar(20) DEFAULT NULL,
   `receiver_read` tinyint(1) NOT NULL DEFAULT 0
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `room_permissions`
---
-
-CREATE TABLE `room_permissions` (
-  `perm_id` int(11) NOT NULL,
-  `room_id` int(11) NOT NULL,
-  `target_role` enum('student','professor') NOT NULL,
-  `can_send_messages` tinyint(4) DEFAULT 1,
-  `can_read_history` tinyint(4) DEFAULT 1,
-  `can_manage_members` tinyint(4) DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
@@ -351,14 +318,6 @@ ALTER TABLE `flagged_reads`
   ADD KEY `flagged_reads_ibfk_2` (`admin_id`);
 
 --
--- Indexes for table `messages`
---
-ALTER TABLE `messages`
-  ADD PRIMARY KEY (`message_id`),
-  ADD KEY `sender_id` (`sender_id`),
-  ADD KEY `receiver_id` (`receiver_id`);
-
---
 -- Indexes for table `message_edits`
 --
 ALTER TABLE `message_edits`
@@ -407,13 +366,6 @@ ALTER TABLE `room_messages`
   ADD KEY `channel_id` (`sub_room_id`),
   ADD KEY `sender_id` (`sender_id`),
   ADD KEY `room_messages_ibfk_3` (`receiver_id`);
-
---
--- Indexes for table `room_permissions`
---
-ALTER TABLE `room_permissions`
-  ADD PRIMARY KEY (`perm_id`),
-  ADD UNIQUE KEY `uq_perm` (`room_id`,`target_role`);
 
 --
 -- Indexes for table `room_roles`
@@ -481,12 +433,6 @@ ALTER TABLE `flagged_messages`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
--- AUTO_INCREMENT for table `messages`
---
-ALTER TABLE `messages`
-  MODIFY `message_id` int(11) NOT NULL AUTO_INCREMENT;
-
---
 -- AUTO_INCREMENT for table `message_edits`
 --
 ALTER TABLE `message_edits`
@@ -515,12 +461,6 @@ ALTER TABLE `room_members`
 --
 ALTER TABLE `room_messages`
   MODIFY `message_id` int(11) NOT NULL AUTO_INCREMENT;
-
---
--- AUTO_INCREMENT for table `room_permissions`
---
-ALTER TABLE `room_permissions`
-  MODIFY `perm_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `room_roles`
@@ -585,13 +525,6 @@ ALTER TABLE `flagged_reads`
   ADD CONSTRAINT `flagged_reads_ibfk_2` FOREIGN KEY (`admin_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE;
 
 --
--- Constraints for table `messages`
---
-ALTER TABLE `messages`
-  ADD CONSTRAINT `messages_ibfk_1` FOREIGN KEY (`sender_id`) REFERENCES `users` (`user_id`),
-  ADD CONSTRAINT `messages_ibfk_2` FOREIGN KEY (`receiver_id`) REFERENCES `users` (`user_id`);
-
---
 -- Constraints for table `message_edits`
 --
 ALTER TABLE `message_edits`
@@ -633,12 +566,6 @@ ALTER TABLE `room_messages`
   ADD CONSTRAINT `room_messages_ibfk_1` FOREIGN KEY (`sub_room_id`) REFERENCES `room_sub_rooms` (`sub_room_id`) ON DELETE CASCADE,
   ADD CONSTRAINT `room_messages_ibfk_2` FOREIGN KEY (`sender_id`) REFERENCES `users` (`user_id`),
   ADD CONSTRAINT `room_messages_ibfk_3` FOREIGN KEY (`receiver_id`) REFERENCES `users` (`user_id`) ON DELETE SET NULL;
-
---
--- Constraints for table `room_permissions`
---
-ALTER TABLE `room_permissions`
-  ADD CONSTRAINT `room_permissions_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `room_roles`
