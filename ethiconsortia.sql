@@ -190,36 +190,15 @@ CREATE TABLE `users` (
   `username` varchar(50) NOT NULL,
   `password` varchar(255) NOT NULL,
   `role` enum('student','professor','admin') DEFAULT 'student',
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `is_banned` tinyint(1) NOT NULL DEFAULT 0 COMMENT '1 = account banned by moderation'
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `users`
 --
 
-INSERT INTO `users` (`user_id`, `full_name`, `username`, `password`, `role`, `created_at`, `is_banned`) VALUES
-(1, 'Jed Igloso', 'jed', 'jed12345678', 'student', '2026-05-10 08:05:24', 0);
-
--- --------------------------------------------------------
-
---
--- Table structure for table `user_warnings`
---
-
-CREATE TABLE `user_warnings` (
-  `user_id` int(11) NOT NULL,
-  `warn_count` int(11) NOT NULL DEFAULT 0,
-  `is_banned` tinyint(1) NOT NULL DEFAULT 0,
-  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `user_warnings`
---
-
-INSERT INTO `user_warnings` (`user_id`, `warn_count`, `is_banned`, `updated_at`) VALUES
-(1, 1, 0, '2026-05-10 09:49:54');
+INSERT INTO `users` (`user_id`, `full_name`, `username`, `password`, `role`, `created_at`) VALUES
+(1, 'Jed Igloso', 'jed', 'jed12345678', 'student', '2026-05-10 08:05:24');
 
 -- --------------------------------------------------------
 
@@ -308,10 +287,7 @@ ALTER TABLE `users`
   ADD UNIQUE KEY `username` (`username`);
 
 --
--- Indexes for table `user_warnings`
---
-ALTER TABLE `user_warnings`
-  ADD PRIMARY KEY (`user_id`);
+
 
 --
 -- Indexes for table `verification_codes`
@@ -428,11 +404,6 @@ ALTER TABLE `room_sub_rooms`
   ADD CONSTRAINT `room_sub_rooms_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE;
 
 --
--- Constraints for table `user_warnings`
---
-ALTER TABLE `user_warnings`
-  ADD CONSTRAINT `user_warnings_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE;
-COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
