@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .env
 graphify-out/
+seed_local.sql

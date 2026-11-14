@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Nov 14, 2026 at 01:58 PM
+-- Generation Time: Nov 14, 2026 at 05:47 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -77,13 +77,6 @@ CREATE TABLE `flagged_messages` (
   `sub_room_id` int(11) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
---
--- Dumping data for table `flagged_messages`
---
-
-INSERT INTO `flagged_messages` (`id`, `user_id`, `room_msg_id`, `original`, `censored`, `flagged_at`, `category`, `sub_room_id`) VALUES
-(1, 1, 2, 'Fuck', '****', '2026-05-10 09:49:57', 'filtered', 1);
-
 -- --------------------------------------------------------
 
 --
@@ -143,15 +136,10 @@ CREATE TABLE `rooms` (
   `department_id` varchar(50) DEFAULT NULL,
   `department_name` varchar(100) DEFAULT NULL,
   `is_archived` tinyint(1) NOT NULL DEFAULT 0,
-  `archived_at` timestamp NULL DEFAULT NULL
+  `archived_at` timestamp NULL DEFAULT NULL,
+  `logo` longtext DEFAULT NULL,
+  `logo_updated` timestamp NULL DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `rooms`
---
-
-INSERT INTO `rooms` (`room_id`, `room_name`, `description`, `host_id`, `invite_code`, `created_at`, `department_id`, `department_name`, `is_archived`, `archived_at`) VALUES
-(1, 'CC103', 'Intermediate Programming', 1, '87534F46', '2026-05-10 08:05:52', NULL, NULL, 0, NULL);
 
 -- --------------------------------------------------------
 
@@ -184,13 +172,6 @@ CREATE TABLE `room_members` (
   `can_manage_members` tinyint(1) NOT NULL DEFAULT 0,
   `can_post_announcements` tinyint(1) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `room_members`
---
-
-INSERT INTO `room_members` (`member_id`, `room_id`, `user_id`, `room_role`, `joined_at`, `can_send_messages`, `can_read_history`, `can_manage_members`, `can_post_announcements`) VALUES
-(1, 1, 1, 'host', '2026-05-10 08:05:52', 1, 1, 1, 0);
 
 -- --------------------------------------------------------
 
@@ -226,14 +207,6 @@ CREATE TABLE `room_messages` (
   `receiver_read` tinyint(1) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
---
--- Dumping data for table `room_messages`
---
-
-INSERT INTO `room_messages` (`message_id`, `sub_room_id`, `sender_id`, `content`, `sent_at`, `is_private`, `receiver_id`, `msg_type`, `is_edited`, `edited_at`, `msg_tag`, `msg_tag_label`, `receiver_read`) VALUES
-(1, 3, 1, 'hello', '2026-05-10 08:06:19', 0, NULL, 'text', 0, NULL, 'none', NULL, 1),
-(2, 1, 1, '****', '2026-05-10 09:49:57', 0, NULL, 'text', 0, NULL, 'none', NULL, 1);
-
 -- --------------------------------------------------------
 
 --
@@ -248,14 +221,6 @@ CREATE TABLE `room_permissions` (
   `can_read_history` tinyint(4) DEFAULT 1,
   `can_manage_members` tinyint(4) DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `room_permissions`
---
-
-INSERT INTO `room_permissions` (`perm_id`, `room_id`, `target_role`, `can_send_messages`, `can_read_history`, `can_manage_members`) VALUES
-(1, 1, 'student', 1, 1, 1),
-(2, 1, 'professor', 1, 1, 1);
 
 -- --------------------------------------------------------
 
@@ -288,16 +253,6 @@ CREATE TABLE `room_sub_rooms` (
   `everyone_send` tinyint(1) NOT NULL DEFAULT 1,
   `everyone_upload` tinyint(1) NOT NULL DEFAULT 1
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `room_sub_rooms`
---
-
-INSERT INTO `room_sub_rooms` (`sub_room_id`, `room_id`, `sub_room_name`, `sub_room_type`, `position`, `sub_room_type_detail`, `dm_user_a`, `dm_user_b`, `everyone_read`, `everyone_send`, `everyone_upload`) VALUES
-(1, 1, 'General', 'text', 0, 'public', NULL, NULL, 1, 1, 1),
-(2, 1, 'Announcements', 'announcement', 1, 'public', NULL, NULL, 1, 0, 0),
-(3, 1, 'open-forum', 'text', 2, 'public', NULL, NULL, 1, 1, 1),
-(4, 1, 'hello', 'text', 3, 'public', NULL, NULL, 1, 1, 1);
 
 -- --------------------------------------------------------
 
@@ -340,13 +295,6 @@ CREATE TABLE `users` (
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
---
--- Dumping data for table `users`
---
-
-INSERT INTO `users` (`user_id`, `full_name`, `username`, `password`, `role`, `created_at`) VALUES
-(1, 'Jed Igloso', 'jed', 'REMOVED', 'student', '2026-05-10 08:05:24');
-
 -- --------------------------------------------------------
 
 --
@@ -359,14 +307,6 @@ CREATE TABLE `verification_codes` (
   `code` varchar(50) NOT NULL,
   `is_active` tinyint(4) DEFAULT 1
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `verification_codes`
---
-
-INSERT INTO `verification_codes` (`code_id`, `role`, `code`, `is_active`) VALUES
-(3, 'professor', 'REMOVED', 1),
-(4, 'admin', 'REMOVED', 1);
 
 --
 -- Indexes for dumped tables
@@ -538,7 +478,7 @@ ALTER TABLE `filtered_words`
 -- AUTO_INCREMENT for table `flagged_messages`
 --
 ALTER TABLE `flagged_messages`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `messages`
@@ -556,7 +496,7 @@ ALTER TABLE `message_edits`
 -- AUTO_INCREMENT for table `rooms`
 --
 ALTER TABLE `rooms`
-  MODIFY `room_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+  MODIFY `room_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `room_bans`
@@ -568,19 +508,19 @@ ALTER TABLE `room_bans`
 -- AUTO_INCREMENT for table `room_members`
 --
 ALTER TABLE `room_members`
-  MODIFY `member_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+  MODIFY `member_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `room_messages`
 --
 ALTER TABLE `room_messages`
-  MODIFY `message_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
+  MODIFY `message_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `room_permissions`
 --
 ALTER TABLE `room_permissions`
-  MODIFY `perm_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
+  MODIFY `perm_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `room_roles`
@@ -592,19 +532,19 @@ ALTER TABLE `room_roles`
 -- AUTO_INCREMENT for table `room_sub_rooms`
 --
 ALTER TABLE `room_sub_rooms`
-  MODIFY `sub_room_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
+  MODIFY `sub_room_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `users`
 --
 ALTER TABLE `users`
-  MODIFY `user_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+  MODIFY `user_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `verification_codes`
 --
 ALTER TABLE `verification_codes`
-  MODIFY `code_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
+  MODIFY `code_id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
 -- Constraints for dumped tables
