@@ -64,6 +64,8 @@ class RoomFrame(tk.Toplevel):
         self.my_room_role = room_role
         self.host_id = host_id
         self.parent_lobby = parent_lobby
+        # admins only have admin power in rooms that belong to a department
+        self.is_admin_here = sys_role == "admin" and self._room_has_department()
 
         self.selected_sub_room_id = -1
         self.selected_sub_room_name = ""
@@ -137,7 +139,7 @@ class RoomFrame(tk.Toplevel):
         tk.Label(p, text=self.room_name.upper(), font=theme.font(12, "bold"), fg="white",
                  bg=theme.SUB_ROOM_BG, anchor="w").place(x=12, y=14, width=168, height=22)
 
-        is_host_or_admin = self.my_room_role == "host" or self.current_sys_role == "admin"
+        is_host_or_admin = self.my_room_role == "host" or self.is_admin_here
         if is_host_or_admin:
             cog = tk.Button(p, text="\u2699", font=theme.font(13, "bold", emoji=True),
                              fg="white", bg=theme.SUB_ROOM_BG, relief="solid", bd=1,
@@ -224,7 +226,7 @@ class RoomFrame(tk.Toplevel):
             dm_partner_id = -1
             if is_private:
                 is_participant = dm_a == self.current_user_id or dm_b == self.current_user_id
-                if not is_participant and self.current_sys_role != "admin":
+                if not is_participant and not self.is_admin_here:
                     continue
                 a_name = r["dm_a_name"] or "?"
                 b_name = r["dm_b_name"] or "?"
@@ -376,7 +378,7 @@ class RoomFrame(tk.Toplevel):
             if self.current_user_id in (a, b):
                 partner = b if a == self.current_user_id else a
                 name = f"DM-{b_name if a == self.current_user_id else a_name}"
-            elif self.current_sys_role == "admin":
+            elif self.is_admin_here:
                 name = f"DM-{a_name} \u2194 {b_name}"
             else:
                 return          # DMs are only for the two people in them and admins
@@ -647,7 +649,7 @@ class RoomFrame(tk.Toplevel):
 
         tk.Label(p, text="MEMBERS", font=theme.font(11, "bold"), fg="#6482b4", bg=theme.RIGHT_BG,
                  anchor="w").place(x=12, y=14, width=265, height=18)
-        if self.current_sys_role == "admin":
+        if self.is_admin_here:
             btn_host = theme.make_button(p, "Assign Host", theme.MEDIUM_BLUE, font_size=9,
                                           command=self.open_assign_host_dialog)
             btn_host.place(x=175, y=10, width=85, height=24)
@@ -758,7 +760,7 @@ class RoomFrame(tk.Toplevel):
         tk.Label(row, text=sub, font=theme.font(9), fg=(theme.RED_ACCENT if member_role == "host"
                  else "#6482b4"), bg=row["bg"], anchor="w").place(x=50, y=22, width=160, height=13)
 
-        is_admin_viewer = self.current_sys_role == "admin"
+        is_admin_viewer = self.is_admin_here
         can_kick = is_admin_viewer or (
             self.get_permission("can_manage_members")
             and member_role != "host"
@@ -770,8 +772,8 @@ class RoomFrame(tk.Toplevel):
                             command=lambda: self.kick_member(uid, dname))
             kick.place(x=225, y=10, width=28, height=22)
 
-        if is_banned_u and (self.current_sys_role == "admin"
-                            or is_exempt_host(self.current_user_id, self.room_id)):
+        can_unban = self.is_admin_here or self.my_room_role == "host"
+        if is_banned_u and can_unban:
             unban = tk.Button(row, text="\u21a9", font=theme.font(9, "bold"), fg="white",
                                bg="#288c50", relief="flat", bd=0, cursor="hand2",
                                command=lambda: self.unban_user(uid, dname))
@@ -812,7 +814,7 @@ class RoomFrame(tk.Toplevel):
 
         was_host = row["room_role"] == "host"
 
-        if self.current_sys_role != "admin":
+        if not self.is_admin_here:
             if was_host:
                 messagebox.showwarning("Not allowed",
                                         "Only an administrator can remove the host.",
@@ -848,7 +850,7 @@ class RoomFrame(tk.Toplevel):
             messagebox.showerror("Error", str(ex), parent=self)
 
     def open_assign_host_dialog(self):
-        if self.current_sys_role != "admin":
+        if not self.is_admin_here:
             return
         dlg = tk.Toplevel(self)
         dlg.title("Assign Host")
@@ -918,10 +920,9 @@ class RoomFrame(tk.Toplevel):
         btn.place(x=80, y=340, width=200, height=38)
 
     def unban_user(self, uid, name):
-        if (self.current_sys_role != "admin"
-                and not is_exempt_host(self.current_user_id, self.room_id)):
+        if not self._is_host_or_admin():
             messagebox.showwarning("Not allowed",
-                                    "Only an administrator can unban people in this room.",
+                                    "Only the host or an administrator can unban people in this room.",
                                     parent=self)
             return
         if not messagebox.askyesno("Unban User",
@@ -936,7 +937,7 @@ class RoomFrame(tk.Toplevel):
                 messagebox.showinfo(
                     "Still banned",
                     f"{name} is also banned from this room's whole department.\n"
-                    "Lift that from \U0001F465 Department Members on the dashboard.",
+                    "Only an administrator can lift that.",
                     parent=self)
             self.load_members()
         except Exception as ex:
@@ -949,7 +950,7 @@ class RoomFrame(tk.Toplevel):
         if self.selected_sub_room_id == -1:
             return
 
-        if not self.selected_is_private and self.current_sys_role != "admin":
+        if not self.selected_is_private and not self.is_admin_here:
             if not self.channel_perms(self.selected_sub_room_id)[0]:
                 if self._last_msg_sig != "no-permission":
                     self.show_no_permission(
@@ -1625,7 +1626,7 @@ class RoomFrame(tk.Toplevel):
         if is_banned(self.current_user_id, self.room_id):
             messagebox.showwarning("Banned", "You are banned from this room.", parent=self)
             return False
-        if self.selected_is_private or self.current_sys_role == "admin":
+        if self.selected_is_private or self.is_admin_here:
             return True
         _r, can_send, can_upload = self.channel_perms(self.selected_sub_room_id)
         if upload:
@@ -1639,8 +1640,19 @@ class RoomFrame(tk.Toplevel):
         messagebox.showwarning("Permission Denied", msg, parent=self)
         return False
 
+    def _room_has_department(self):
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT department_id FROM rooms WHERE room_id=%s", (self.room_id,))
+            row = cur.fetchone()
+            cur.close()
+            return bool(row and row[0])
+        except Exception:
+            return False
+
     def _is_host_or_admin(self):
-        if self.current_sys_role == "admin":
+        if self.is_admin_here:
             return True
         try:
             conn = get_connection()
@@ -1658,7 +1670,7 @@ class RoomFrame(tk.Toplevel):
         Admins and the host always have everything. Everyone else gets 'Everyone' plus all
         their roles combined, limited by their personal Can Read History / Can Send
         Messages switches in Room Settings."""
-        if self.current_sys_role == "admin":
+        if self.is_admin_here:
             return True, True, True
         try:
             conn = get_connection()
@@ -1719,7 +1731,7 @@ class RoomFrame(tk.Toplevel):
     # ═════════════════════════════════════════════════════════════════
     def get_permission(self, column):
         # only admins bypass; the host's stored permissions are respected
-        if self.current_sys_role == "admin":
+        if self.is_admin_here:
             return True
         if column not in ("can_send_messages", "can_read_history", "can_manage_members"):
             return False
@@ -1743,7 +1755,7 @@ class RoomFrame(tk.Toplevel):
         lock_msg = BANNED_MSG if banned else RESTRICTED_MSG
         if banned:
             allowed = False
-        elif (self.selected_is_private or self.current_sys_role == "admin"
+        elif (self.selected_is_private or self.is_admin_here
                 or self.selected_sub_room_id == -1):
             allowed = True
         else:
@@ -1811,7 +1823,7 @@ class RoomFrame(tk.Toplevel):
                 WHERE rm.room_id = %s AND (rm.room_role != 'host' OR %s) AND u.role != 'admin'
                 ORDER BY FIELD(rm.room_role,'host','member'), u.full_name ASC
                 """,
-                (self.room_id, self.current_sys_role == "admin"),
+                (self.room_id, self.is_admin_here),
             )
             for r in cur.fetchall():
                 label = f'{r["full_name"] or r["username"]} (@{r["username"]})'
@@ -1906,7 +1918,7 @@ class RoomFrame(tk.Toplevel):
                     "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
                     "WHERE s.room_id=%s AND (s.sub_room_type_detail='public' OR %s) "
                     "ORDER BY s.position ASC",
-                    (self.room_id, self.current_sys_role == "admin"),
+                    (self.room_id, self.is_admin_here),
                 )
                 rows = cur.fetchall()
                 cur.close()
@@ -1987,13 +1999,13 @@ class RoomFrame(tk.Toplevel):
 
         self._dlg_sep(dlg, 470)
 
-        if self.current_sys_role == "admin":
+        if self.is_admin_here:
             btn_flagged = theme.make_button(dlg, "\U0001F4CB View Flagged Messages",
                                              theme.WARN_ORANGE, font_size=10, emoji=True,
                                              command=lambda: self.open_flagged_messages_viewer(dlg))
             btn_flagged.place(x=20, y=480, width=220, height=28)
 
-        if self.my_room_role == "host" or self.current_sys_role == "admin":
+        if self.my_room_role == "host" or self.is_admin_here:
             def do_delete_room():
                 if messagebox.askyesno(
                         "Delete Room",
@@ -2029,7 +2041,7 @@ class RoomFrame(tk.Toplevel):
         btn_save = theme.make_button(dlg, "Save Permissions", theme.MEDIUM_BLUE, font_size=13,
                                       command=do_save)
         btn_save.place(x=165, y=552, width=230, height=38)
-        if self.my_room_role == "host" or self.current_sys_role == "admin":
+        if self.my_room_role == "host" or self.is_admin_here:
             is_arch = self._room_is_archived()
 
             def do_toggle_archive():
@@ -2083,7 +2095,7 @@ class RoomFrame(tk.Toplevel):
         tree.place(x=14, y=44, width=668, height=410)
 
         try:
-            rows = get_admin_flagged(self.current_user_id, is_admin=self.current_sys_role == "admin")
+            rows = get_admin_flagged(self.current_user_id, is_admin=self.is_admin_here)
             for r in rows:
                 suspicious = r["category"] == "suspicious"
                 tree.insert("", tk.END, tags=("unread",) if r["is_unread"] else (), values=(
@@ -2453,7 +2465,7 @@ class RoomFrame(tk.Toplevel):
     def open_filtered_words_dialog(self):
         if self.current_sys_role not in ("professor", "admin"):
             return
-        is_admin = self.current_sys_role == "admin"
+        is_admin = self.is_admin_here
 
         dlg = tk.Toplevel(self)
         dlg.title("Filtered Words")
@@ -2557,7 +2569,7 @@ class RoomFrame(tk.Toplevel):
             sql = ("UPDATE room_members SET can_send_messages=%s, can_read_history=%s, "
                    "can_manage_members=%s, can_post_announcements=%s "
                    "WHERE room_id=%s AND user_id=%s")
-            if self.current_sys_role != "admin":
+            if not self.is_admin_here:
                 sql += " AND room_role != 'host'"
             cur.execute(sql, (int(can_send), int(can_read), int(can_manage),
                               int(can_post_announce), self.room_id, user_id))
@@ -2650,7 +2662,7 @@ class RoomFrame(tk.Toplevel):
                 "UPDATE rooms SET is_archived=%s, archived_at=IF(%s=1, NOW(), NULL) "
                 "WHERE room_id=%s AND (host_id=%s OR %s=1)",
                 (int(archived), int(archived), self.room_id, self.current_user_id,
-                 1 if self.current_sys_role == "admin" else 0),
+                 1 if self.is_admin_here else 0),
             )
             ok = cur.rowcount > 0
             cur.close()
@@ -2662,7 +2674,7 @@ class RoomFrame(tk.Toplevel):
     def check_archived(self):
         """Members still inside a room that just got archived go back to the lobby.
         Returns True if this window was closed."""
-        if self.current_sys_role == "admin" or self.my_room_role == "host":
+        if self.is_admin_here or self.my_room_role == "host":
             return False
         if not self._room_is_archived():
             return False
@@ -2712,7 +2724,7 @@ class RoomFrame(tk.Toplevel):
             self._polling_job = None
 
     def check_admin_alerts(self):
-        is_admin = self.current_sys_role == "admin"
+        is_admin = self.is_admin_here
         if not is_admin and self.my_room_role != "host":
             return
         n = count_unread_alerts(self.current_user_id, is_admin)

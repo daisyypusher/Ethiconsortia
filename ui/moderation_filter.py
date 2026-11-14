@@ -391,8 +391,7 @@ _ADMIN_SCOPE = """
     (r.department_id IN (SELECT department_id FROM admin_departments WHERE user_id = %s)
      OR r.department_id IN (SELECT r2.department_id FROM rooms r2
                             JOIN room_members rm2 ON rm2.room_id = r2.room_id
-                            WHERE rm2.user_id = %s AND r2.department_id IS NOT NULL)
-     OR r.room_id IN (SELECT room_id FROM room_members WHERE user_id = %s))
+                            WHERE rm2.user_id = %s AND r2.department_id IS NOT NULL))
 """
 
 
@@ -400,7 +399,7 @@ def count_unread_alerts(user_id: int, is_admin: bool = True) -> int:
     """Held-back messages this user hasn't opened yet.
     Admins: their departments. Hosts: the rooms they host."""
     scope = _ADMIN_SCOPE if is_admin else "r.host_id = %s"
-    n_scope = 3 if is_admin else 1
+    n_scope = 2 if is_admin else 1
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -426,7 +425,7 @@ def get_admin_flagged(user_id: int, limit: int = 200, is_admin: bool = True):
     """Held-back messages for this admin's departments (or this host's rooms),
     with per-user unread status."""
     scope = _ADMIN_SCOPE if is_admin else "r.host_id = %s"
-    n_scope = 3 if is_admin else 1
+    n_scope = 2 if is_admin else 1
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     cur.execute(
