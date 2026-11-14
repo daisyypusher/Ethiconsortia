@@ -403,7 +403,164 @@ ALTER TABLE `room_permissions`
 ALTER TABLE `room_sub_rooms`
   ADD CONSTRAINT `room_sub_rooms_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE;
 
---
+-- ═══════════ Ethiconsortia schema sync ═══════════
+
+-- rooms: nullable host, department + archive columns
+ALTER TABLE `rooms` DROP FOREIGN KEY `rooms_ibfk_1`;
+ALTER TABLE `rooms`
+  MODIFY `host_id` int(11) DEFAULT NULL,
+  ADD COLUMN `department_id` varchar(50) DEFAULT NULL,
+  ADD COLUMN `department_name` varchar(100) DEFAULT NULL,
+  ADD COLUMN `is_archived` tinyint(1) NOT NULL DEFAULT 0,
+  ADD COLUMN `archived_at` timestamp NULL DEFAULT NULL,
+  ADD KEY `idx_rooms_department` (`department_id`);
+ALTER TABLE `rooms`
+  ADD CONSTRAINT `rooms_ibfk_1` FOREIGN KEY (`host_id`) REFERENCES `users` (`user_id`) ON DELETE SET NULL;
+
+-- room_members: per-member permissions
+ALTER TABLE `room_members`
+  ADD COLUMN `can_send_messages` tinyint(1) NOT NULL DEFAULT 1,
+  ADD COLUMN `can_read_history` tinyint(1) NOT NULL DEFAULT 1,
+  ADD COLUMN `can_manage_members` tinyint(1) NOT NULL DEFAULT 0,
+  ADD COLUMN `can_post_announcements` tinyint(1) NOT NULL DEFAULT 0;
+UPDATE `room_members` SET `can_manage_members` = 1 WHERE `room_role` = 'host';
+
+-- room_messages: longtext for attachments, edit/tag/read columns
+ALTER TABLE `room_messages`
+  MODIFY `content` longtext NOT NULL,
+  ADD COLUMN `is_edited` tinyint(1) NOT NULL DEFAULT 0,
+  ADD COLUMN `edited_at` timestamp NULL DEFAULT NULL,
+  ADD COLUMN `msg_tag` varchar(20) NOT NULL DEFAULT 'none',
+  ADD COLUMN `msg_tag_label` varchar(20) DEFAULT NULL,
+  ADD COLUMN `receiver_read` tinyint(1) NOT NULL DEFAULT 0;
+UPDATE `room_messages` SET `receiver_read` = 1;   -- everything that already exists counts as read
+ALTER TABLE `room_messages`
+  ADD CONSTRAINT `room_messages_ibfk_3` FOREIGN KEY (`receiver_id`) REFERENCES `users` (`user_id`) ON DELETE SET NULL;
+
+-- room_sub_rooms: "Everyone" permissions
+ALTER TABLE `room_sub_rooms`
+  ADD COLUMN `everyone_read` tinyint(1) NOT NULL DEFAULT 1,
+  ADD COLUMN `everyone_send` tinyint(1) NOT NULL DEFAULT 1,
+  ADD COLUMN `everyone_upload` tinyint(1) NOT NULL DEFAULT 1;
+UPDATE `room_sub_rooms` SET `everyone_send` = 0, `everyone_upload` = 0
+  WHERE `sub_room_type` = 'announcement';
+
+-- flagged_messages: category + sub-room (backfilled from the message when possible)
+ALTER TABLE `flagged_messages`
+  ADD COLUMN `category` varchar(20) NOT NULL DEFAULT 'filtered',
+  ADD COLUMN `sub_room_id` int(11) DEFAULT NULL;
+UPDATE `flagged_messages` fm
+  JOIN `room_messages` m ON m.`message_id` = fm.`room_msg_id`
+  SET fm.`sub_room_id` = m.`sub_room_id`
+  WHERE fm.`sub_room_id` IS NULL;
+ALTER TABLE `flagged_messages`
+  ADD CONSTRAINT `flagged_messages_ibfk_2` FOREIGN KEY (`sub_room_id`) REFERENCES `room_sub_rooms` (`sub_room_id`) ON DELETE CASCADE;
+
+-- ── new tables ──
+CREATE TABLE `message_edits` (
+  `edit_id` int(11) NOT NULL AUTO_INCREMENT,
+  `message_id` int(11) NOT NULL,
+  `old_content` longtext NOT NULL,
+  `new_content` longtext NOT NULL,
+  `edited_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`edit_id`),
+  KEY `idx_edits_message` (`message_id`),
+  CONSTRAINT `message_edits_ibfk_1` FOREIGN KEY (`message_id`) REFERENCES `room_messages` (`message_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `flagged_reads` (
+  `flag_id` int(11) NOT NULL,
+  `admin_id` int(11) NOT NULL,
+  `read_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`flag_id`,`admin_id`),
+  CONSTRAINT `flagged_reads_ibfk_1` FOREIGN KEY (`flag_id`) REFERENCES `flagged_messages` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `flagged_reads_ibfk_2` FOREIGN KEY (`admin_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `filtered_words` (
+  `word_id` int(11) NOT NULL AUTO_INCREMENT,
+  `room_id` int(11) DEFAULT NULL COMMENT 'NULL = applies to all rooms',
+  `word` varchar(50) NOT NULL,
+  `added_by` int(11) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`word_id`),
+  KEY `idx_fw_room` (`room_id`),
+  CONSTRAINT `filtered_words_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE,
+  CONSTRAINT `filtered_words_ibfk_2` FOREIGN KEY (`added_by`) REFERENCES `users` (`user_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `room_warnings` (
+  `user_id` int(11) NOT NULL,
+  `room_id` int(11) NOT NULL,
+  `warn_count` int(11) NOT NULL DEFAULT 0,
+  PRIMARY KEY (`user_id`,`room_id`),
+  CONSTRAINT `room_warnings_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+  CONSTRAINT `room_warnings_ibfk_2` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `room_bans` (
+  `ban_id` int(11) NOT NULL AUTO_INCREMENT,
+  `room_id` int(11) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `banned_by` int(11) DEFAULT NULL,
+  `banned_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`ban_id`),
+  UNIQUE KEY `uq_room_ban` (`room_id`,`user_id`),
+  CONSTRAINT `room_bans_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE,
+  CONSTRAINT `room_bans_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+  CONSTRAINT `room_bans_ibfk_3` FOREIGN KEY (`banned_by`) REFERENCES `users` (`user_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `department_bans` (
+  `ban_id` int(11) NOT NULL AUTO_INCREMENT,
+  `department_id` varchar(50) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `banned_by` int(11) DEFAULT NULL,
+  `banned_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`ban_id`),
+  UNIQUE KEY `uq_dept_ban` (`department_id`,`user_id`),
+  CONSTRAINT `department_bans_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+  CONSTRAINT `department_bans_ibfk_2` FOREIGN KEY (`banned_by`) REFERENCES `users` (`user_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `admin_departments` (
+  `user_id` int(11) NOT NULL,
+  `department_id` varchar(50) NOT NULL,
+  PRIMARY KEY (`user_id`,`department_id`),
+  CONSTRAINT `admin_departments_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `room_roles` (
+  `role_id` int(11) NOT NULL AUTO_INCREMENT,
+  `room_id` int(11) NOT NULL,
+  `role_name` varchar(30) NOT NULL,
+  PRIMARY KEY (`role_id`),
+  UNIQUE KEY `uq_role_name` (`room_id`,`role_name`),
+  CONSTRAINT `room_roles_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `room_member_roles` (
+  `room_id` int(11) NOT NULL,
+  `user_id` int(11) NOT NULL,
+  `role_id` int(11) NOT NULL,
+  PRIMARY KEY (`role_id`,`user_id`),
+  KEY `idx_mr_room_user` (`room_id`,`user_id`),
+  CONSTRAINT `room_member_roles_ibfk_1` FOREIGN KEY (`room_id`) REFERENCES `rooms` (`room_id`) ON DELETE CASCADE,
+  CONSTRAINT `room_member_roles_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+  CONSTRAINT `room_member_roles_ibfk_3` FOREIGN KEY (`role_id`) REFERENCES `room_roles` (`role_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `sub_room_role_perms` (
+  `sub_room_id` int(11) NOT NULL,
+  `role_id` int(11) NOT NULL,
+  `can_read` tinyint(1) NOT NULL DEFAULT 0,
+  `can_send` tinyint(1) NOT NULL DEFAULT 0,
+  `can_upload` tinyint(1) NOT NULL DEFAULT 0,
+  PRIMARY KEY (`sub_room_id`,`role_id`),
+  CONSTRAINT `sub_room_role_perms_ibfk_1` FOREIGN KEY (`sub_room_id`) REFERENCES `room_sub_rooms` (`sub_room_id`) ON DELETE CASCADE,
+  CONSTRAINT `sub_room_role_perms_ibfk_2` FOREIGN KEY (`role_id`) REFERENCES `room_roles` (`role_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
