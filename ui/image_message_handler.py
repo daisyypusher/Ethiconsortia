@@ -17,7 +17,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageTk
 MAX_PREVIEW_PX = 320
 MAX_BYTES = 5 * 1024 * 1024
 ACCEPT_EXT = [("Image files", "*.jpg *.jpeg *.png *.gif *.bmp *.webp")]
-MAX_ATTACH_BYTES = 25 * 1024 * 1024  # 25 MB for any file/video
+MAX_ATTACH_BYTES = 10 * 1024 * 1024  # 10 MB for any file/video
 
 
 def choose_image_file(parent):
