@@ -14,6 +14,11 @@ from ui.moderation_filter import (
     is_locked_out, is_department_banned, is_banned,
 )
 
+ROOM_FILTERS = {
+    "all": "All rooms",
+    "dept": "Department rooms",
+    "none": "No department",
+}
 
 class RoomLobbyFrame(tk.Tk):
     def __init__(self, user_id, username, full_name, role):
@@ -78,7 +83,13 @@ class RoomLobbyFrame(tk.Tk):
                  anchor="center").place(x=0, y=70, width=888, height=22)
 
         tk.Label(content, text="YOUR ROOMS", font=theme.font(11, "bold"), fg="#8ca5d2",
-                 bg=theme.DARK_NAVY, anchor="w").place(x=44, y=110, width=800, height=18)
+                 bg=theme.DARK_NAVY, anchor="w").place(x=44, y=110, width=400, height=18)
+
+        self._room_filter = "all"
+        self.btn_filter = theme.make_button(
+            content, f"Filter: {ROOM_FILTERS['all']}  \u25BE", "#28376e", font_size=10,
+            bold=False, command=self._show_filter_menu)
+        self.btn_filter.place(x=654, y=107, width=190, height=24)
 
         rooms_outer = tk.Frame(content, bg=theme.ROOMS_BG, highlightbackground=theme.MEDIUM_BLUE,
                                 highlightthickness=1)
@@ -140,86 +151,127 @@ class RoomLobbyFrame(tk.Tk):
             btn_join.place(x=498, y=392, width=210, height=58)
 
         self.refresh_rooms()
+        self._poll_rooms()
+
+    def _apply_room_filter(self, rows):
+        """Keeps only the rooms the filter button allows."""
+        if self._room_filter == "dept":
+            return [r for r in rows if r["department_id"]]
+        if self._room_filter == "none":
+            return [r for r in rows if not r["department_id"]]
+        return rows
+
+    def _show_filter_menu(self):
+        menu = tk.Menu(self, tearoff=0)
+        for key, label in ROOM_FILTERS.items():
+            menu.add_command(label=label, command=lambda k=key: self._set_room_filter(k))
+        try:
+            menu.tk_popup(self.btn_filter.winfo_rootx(),
+                          self.btn_filter.winfo_rooty() + self.btn_filter.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _set_room_filter(self, key):
+        self._room_filter = key
+        self.btn_filter.configure(text=f"Filter: {ROOM_FILTERS[key]}  \u25BE")
+        self.refresh_rooms()
+
+    def _poll_rooms(self):
+        """Re-checks the room list every 2 s so archive / restore / kick show up
+        in real time. Skips while the lobby is hidden behind a room window."""
+        try:
+            if self.state() != "withdrawn":
+                self.refresh_rooms()
+            self.after(2000, self._poll_rooms)
+        except tk.TclError:
+            pass          # window was closed
 
     # ── Public refresh method (called by RoomFrame on back) ──
     def refresh_rooms(self):
-        for w in self.rooms_list_panel.winfo_children():
-            w.destroy()
-        for w in self.sidebar.winfo_children():
-            w.destroy()
-        self._rebuild_sidebar_divider()
-
         try:
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
             cur.execute(
                 """
                 SELECT r.room_id, r.room_name, r.description, r.host_id, r.invite_code,
-                       r.is_archived,
+                       r.is_archived, r.department_id,
                        COALESCE(rm.room_role, 'member') AS room_role
                 FROM rooms r
                 LEFT JOIN room_members rm
                        ON r.room_id = rm.room_id AND rm.user_id = %s
                 WHERE (rm.user_id IS NOT NULL
-                       OR r.department_id IN (
-                            SELECT department_id FROM admin_departments WHERE user_id = %s))
+                       OR (%s = 1 AND r.department_id IN (
+                            SELECT department_id FROM admin_departments WHERE user_id = %s)))
                   AND r.is_archived = 0
                 ORDER BY r.created_at ASC
                 """,
-                (self.current_user_id, self.current_user_id),
+                (self.current_user_id,
+                 1 if self.current_role == "admin" else 0, self.current_user_id),
             )
             rows = cur.fetchall()
             cur.close()
             rows = [r for r in rows if not is_locked_out(self.current_user_id, r["room_id"])]
-            # show the bottom-left button only if this host/admin has archived rooms
             try:
                 n_arch = len(self._fetch_archived_rooms())
             except Exception:
                 n_arch = 0
-            if n_arch:
-                self.btn_archived.configure(text=f"\U0001F4E6 {n_arch}\nArchived")
-                self.btn_archived.place(x=4, y=588, width=64, height=44)
-            else:
-                self.btn_archived.place_forget()
-
-            side_y = 15
-            col, row = 0, 0
-            max_cols = 3
-
-            for r in rows:
-                effective_role = r["room_role"]
-                desc = r["description"]
-
-                card = self._build_room_card(r["room_id"], r["room_name"], desc,
-                                              effective_role, r["invite_code"], r["host_id"])
-                card.grid(row=row, column=col, padx=7, pady=7)
-                col += 1
-                if col >= max_cols:
-                    col = 0
-                    row += 1
-
-                icon = self._build_sidebar_icon(r["room_name"], r["room_id"], r["room_name"],
-                                                 effective_role, r["host_id"])
-                icon.place(x=13, y=side_y, width=46, height=46)
-                side_y += 58
-
-            if not rows:
-                empty = tk.Label(
-                    self.rooms_list_panel,
-                    text="No rooms yet.\nCreate or join one below!",
-                    font=theme.font(13, slant="italic"), fg="#78a0c8", bg=theme.ROOMS_BG,
-                    justify="center",
-                )
-                empty.place(x=0, y=0, width=790, height=202)
-
         except Exception as ex:
             print(f"Error loading rooms: {ex}")
+            return
+
+        # the filter button decides which rooms show (dashboard and sidebar)
+        flt = self._room_filter
+        if flt == "dept":
+            rows = [r for r in rows if r["department_id"]]
+        elif flt == "none":
+            rows = [r for r in rows if not r["department_id"]]
+        else:
+            rows.sort(key=lambda r: not r["department_id"])   # department rooms first
+
+        # nothing changed -> leave the dashboard alone (no flicker)
+        sig = (flt, tuple(tuple(r.items()) for r in rows), n_arch)
+        if sig == getattr(self, "_last_rooms_sig", None):
+            return
+        self._last_rooms_sig = sig
+
+        for w in self.rooms_list_panel.winfo_children():
+            w.destroy()
+        for w in self.sidebar.winfo_children():
+            w.destroy()
+        self._rebuild_sidebar_divider()
+
+        # bottom-left button, only when there is something archived to see
+        if n_arch:
+            self.btn_archived.configure(text=f"\U0001F4E6 {n_arch}\nArchived")
+            self.btn_archived.place(x=4, y=588, width=64, height=44)
+        else:
+            self.btn_archived.place_forget()
+
+        if not rows:
+            msg = ("No rooms yet.\nCreate or join one below!" if flt == "all"
+                   else "No rooms match this filter.")
+            tk.Label(self.rooms_list_panel, text=msg, font=theme.font(13, slant="italic"),
+                     fg="#78a0c8", bg=theme.ROOMS_BG,
+                     justify="center").place(x=0, y=0, width=790, height=202)
+            return
+
+        side_y = 15
+        for col, r in enumerate(rows):
+            card = self._build_room_card(r["room_id"], r["room_name"], r["description"],
+                                          r["room_role"], r["invite_code"], r["host_id"],
+                                          r["department_id"])
+            card.grid(row=0, column=col, padx=7, pady=7)
+
+            icon = self._build_sidebar_icon(r["room_name"], r["room_id"], r["room_name"],
+                                             r["room_role"], r["host_id"])
+            icon.place(x=13, y=side_y, width=46, height=46)
+            side_y += 58
 
     def _rebuild_sidebar_divider(self):
         sep = tk.Frame(self.sidebar, bg=theme.MEDIUM_BLUE, height=3)
         sep.place(x=10, y=8, width=52, height=3)
 
-    def _build_room_card(self, r_id, name, desc, r_role, inv_code, host_id):
+    def _build_room_card(self, r_id, name, desc, r_role, inv_code, host_id, dept_id=None):
         card = tk.Frame(self.rooms_list_panel, width=190, height=200, bg=theme.ROOM_CARD_BG,
                          highlightbackground=theme.MEDIUM_BLUE, highlightthickness=1,
                          cursor="hand2")
@@ -247,7 +299,7 @@ class RoomLobbyFrame(tk.Tk):
         tk.Label(card, text=pill_text, font=theme.font(9, "bold"), fg="white", bg=pill_color,
                  anchor="center").place(x=55, y=136, width=80, height=17)
 
-        if r_role == "host" or self.current_role == "admin":
+        if r_role == "host" or (self.current_role == "admin" and dept_id):
             tk.Label(card, text=f"Code: {inv_code}", font=theme.font(9, "bold"), fg="#b4d2ff",
                      bg=theme.ROOM_CARD_BG, anchor="center").place(x=5, y=157, width=180, height=14)
 
@@ -334,7 +386,6 @@ class RoomLobbyFrame(tk.Tk):
             else:
                 for w in (lbl_dn, tf_dept_name, lbl_di, tf_dept_id):
                     w.place_forget()
-
         lbl_status = tk.Label(dlg, text="", font=theme.font(11), fg=theme.RED_ACCENT,
                                bg=theme.ROOMS_BG, anchor="center")
         lbl_status.place(x=20, y=324, width=380, height=18)
@@ -392,7 +443,7 @@ class RoomLobbyFrame(tk.Tk):
             )
 
             # admins monitor the department of any room they create
-            if self.current_role == "admin":
+            if self.current_role == "admin" and dept_id:
                 cur.execute(
                     "INSERT IGNORE INTO admin_departments (user_id, department_id) "
                     "VALUES (%s, %s)", (self.current_user_id, dept_id))
@@ -624,7 +675,8 @@ class RoomLobbyFrame(tk.Tk):
             conn = get_connection()
             cur = conn.cursor(dictionary=True)
             cur.execute(
-                "SELECT room_id, room_name, host_id, is_archived FROM rooms WHERE invite_code=%s",
+                "SELECT room_id, room_name, host_id, is_archived, department_id "
+                "FROM rooms WHERE invite_code=%s",
                 (code,),
             )
             room = cur.fetchone()
@@ -632,7 +684,8 @@ class RoomLobbyFrame(tk.Tk):
                 lbl_status.configure(text="Invalid code. Please try again.")
                 cur.close()
                 return
-            if room["is_archived"] and self.current_role != "admin":
+            if room["is_archived"] and not (self.current_role == "admin"
+                                            and room["department_id"]):
                 lbl_status.configure(text="This room has been archived.")
                 cur.close()
                 return
@@ -641,6 +694,12 @@ class RoomLobbyFrame(tk.Tk):
                 lbl_status.configure(text="You are banned from this room's department.")
                 cur.close()
                 return
+
+            # an admin who enters a department room becomes an admin of that department
+            if self.current_role == "admin" and room["department_id"]:
+                cur.execute(
+                    "INSERT IGNORE INTO admin_departments (user_id, department_id) "
+                    "VALUES (%s, %s)", (self.current_user_id, room["department_id"]))
 
             cur.execute(
                 "SELECT room_role FROM room_members WHERE room_id=%s AND user_id=%s",
@@ -775,22 +834,25 @@ class RoomLobbyFrame(tk.Tk):
         cur = conn.cursor(dictionary=True)
         cur.execute(
             """
-            SELECT r.room_id, r.room_name, r.host_id, r.archived_at,
+            SELECT r.room_id, r.room_name, r.host_id, r.archived_at, r.department_id,
                    COALESCE(rm.room_role, 'member') AS room_role
             FROM rooms r
             LEFT JOIN room_members rm ON rm.room_id = r.room_id AND rm.user_id = %s
             WHERE r.is_archived = 1
               AND (r.host_id = %s
-                   OR (%s = 1 AND (rm.user_id IS NOT NULL
-                        OR r.department_id IN (
-                            SELECT department_id FROM admin_departments WHERE user_id = %s))))
+                   OR (%s = 1 AND r.department_id IS NOT NULL AND r.department_id <> ''
+                       AND (rm.user_id IS NOT NULL
+                            OR r.department_id IN (
+                                SELECT department_id FROM admin_departments
+                                WHERE user_id = %s))))
             ORDER BY r.archived_at DESC
             """,
             (uid, uid, is_admin, uid),
         )
         rows = cur.fetchall()
         cur.close()
-        return [r for r in rows if not is_locked_out(uid, r["room_id"])]
+        return self._apply_room_filter(
+            [r for r in rows if not is_locked_out(uid, r["room_id"])])
 
     def show_archived_rooms_dialog(self):
         dlg = tk.Toplevel(self)
@@ -817,23 +879,39 @@ class RoomLobbyFrame(tk.Tk):
 
         checks = []   # (room_id, BooleanVar)
 
+        last = {"sig": None}
+
         def load():
-            for w in list_panel.winfo_children():
-                w.destroy()
-            checks.clear()
             try:
                 rows = self._fetch_archived_rooms()
             except Exception as ex:
+                for w in list_panel.winfo_children():
+                    w.destroy()
+                checks.clear()
+                last["sig"] = None
                 tk.Label(list_panel, text=f"DB Error: {ex}", font=theme.font(10),
                          fg=theme.RED_ACCENT, bg="#1c2a55", wraplength=430).pack(pady=20)
                 return
+
+            sig = tuple((r["room_id"], r["room_name"]) for r in rows)
+            if sig == last["sig"]:
+                return                      # nothing changed: keep ticks, no flicker
+            last["sig"] = sig
+
+            ticked = {rid for rid, v in checks if v.get()}     # remember the ticks
+            for w in list_panel.winfo_children():
+                w.destroy()
+            checks.clear()
+
             if not rows:
-                tk.Label(list_panel, text="No archived rooms.",
+                tk.Label(list_panel,
+                         text=("No archived rooms." if self._room_filter == "all"
+                               else "No archived rooms match this filter."),
                          font=theme.font(12, slant="italic"), fg="#78a0c8",
                          bg="#1c2a55").pack(pady=90)
                 return
             for r in rows:
-                var = tk.BooleanVar(value=False)
+                var = tk.BooleanVar(value=r["room_id"] in ticked)
                 checks.append((r["room_id"], var))
                 row_f = tk.Frame(list_panel, bg="#1c2a55", height=40)
                 row_f.pack(fill="x")
@@ -869,7 +947,8 @@ class RoomLobbyFrame(tk.Tk):
                 for rid in ids:
                     cur.execute(
                         "UPDATE rooms SET is_archived=0, archived_at=NULL "
-                        "WHERE room_id=%s AND (host_id=%s OR %s=1)",
+                        "WHERE room_id=%s AND (host_id=%s OR (%s=1 "
+                        "AND department_id IS NOT NULL AND department_id <> ''))",
                         (rid, self.current_user_id, is_admin),
                     )
                 cur.close()
@@ -884,7 +963,17 @@ class RoomLobbyFrame(tk.Tk):
                           command=do_restore).place(x=100, y=352, width=300, height=38)
         self._ghost_button(dlg, "Close", dlg.destroy).place(x=190, y=394, width=120, height=22)
 
+        def poll():
+            try:
+                if not dlg.winfo_exists():
+                    return
+                load()
+                dlg.after(2000, poll)
+            except tk.TclError:
+                pass                        # window closed
+
         load()
+        dlg.after(2000, poll)
 
     # ── Enter room ──
     def enter_room(self, room_id, room_name, room_role, host_id, open_sub_room_id=None):
@@ -905,10 +994,12 @@ class RoomLobbyFrame(tk.Tk):
         try:
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute("SELECT is_archived FROM rooms WHERE room_id=%s", (room_id,))
+            cur.execute("SELECT is_archived, department_id FROM rooms WHERE room_id=%s",
+                        (room_id,))
             row = cur.fetchone()
             cur.close()
-            if row and row[0] == 1 and room_role != "host" and self.current_role != "admin":
+            admin_over = self.current_role == "admin" and bool(row and row[1])
+            if row and row[0] == 1 and room_role != "host" and not admin_over:
                 messagebox.showinfo("Room archived",
                                      "This room has been archived by its host.", parent=self)
                 self.refresh_rooms()
