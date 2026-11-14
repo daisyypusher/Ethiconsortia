@@ -22,7 +22,7 @@ BAD_WORDS = [
     # Filipino profanities
     "putangina", "putang ina", "gago", "tangina", "bobo",
     "ulol", "tarantado", "leche", "puta", "bwisit", "inutil",
-    "siraulo", "pakyu", "hayop", "animal", "tanga",
+    "siraulo", "pakyu", "hayop", "tanga",
 ]
 
 MAX_WARNINGS = 3
