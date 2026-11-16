@@ -3,3 +3,6 @@ __pycache__/
 .env
 graphify-out/
 seed_local.sql
+build/
+dist/
+*.spec

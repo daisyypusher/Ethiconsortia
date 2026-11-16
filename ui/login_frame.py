@@ -64,6 +64,12 @@ class LoginFrame(tk.Tk):
                                           command=self.go_register)
         btn_register.place(x=20, y=272, width=280, height=30)
 
+        tk.Button(bg, text="Database settings", font=theme.font(10),
+                  fg=theme.SOFT_BLUE, bg=theme.DARK_NAVY, relief="flat", bd=0,
+                  cursor="hand2", activebackground=theme.DARK_NAVY,
+                  activeforeground="white",
+                  command=self.go_setup).place(x=110, y=428, width=200, height=24)
+
         tk.Label(bg, text="\u00a9 2026 Ethiconsortia", font=theme.font(10),
                  fg="#50648c", bg=theme.DARK_NAVY,
                  anchor="center").place(x=0, y=460, width=420, height=20)
@@ -79,6 +85,11 @@ class LoginFrame(tk.Tk):
         self.destroy()
         from ui.register_frame import RegisterFrame
         RegisterFrame().mainloop()
+
+    def go_setup(self):
+        self.destroy()
+        from ui.setup_frame import SetupFrame
+        SetupFrame().mainloop()
 
     @staticmethod
     def _password_ok(password, stored):
