@@ -55,7 +55,7 @@ def test_connection(host, port, database, user, password):
     try:
         conn = mysql.connector.connect(host=host, port=port, database=database,
                                        user=user, password=password,
-                                       connection_timeout=5)
+                                       connection_timeout=5, use_pure=True)
         conn.close()
         return True, "Connected."
     except MySQLError as e:
@@ -77,6 +77,7 @@ def get_connection():
                 password=cfg["password"],
                 autocommit=True,
                 connection_timeout=5,
+                use_pure=True,
             )
             print("\u2705 Database connected!")
         except MySQLError as e:

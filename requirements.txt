@@ -1,4 +1,4 @@
-mysql-connector-python (version 26.7.0)
-bcrypt (version 5.0.0)
-python-dotenv (version 1.2.4)
-Pillow (version 13.0.0)
+bcrypt==5.0.0
+mysql-connector-python==26.7.0
+pillow==13.0.0
+python-dotenv==1.2.4
