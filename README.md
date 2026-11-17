@@ -19,11 +19,21 @@ You must be on the same network as the database computer.
 
 | Field | Value |
 |---|---|
-| Server address (host) | `<YOUR_IPv4 address>` |
+| Server address (host) | The host computer's IPv4 address (see below) |
 | Port | `3306` |
 | Database name | `ethiconsortia` |
 | Database user | `ethic_app` |
 | Database password | `connect` |
+
+**How to find the server address:**
+
+1. Connect to the same network (Wi-Fi or LAN) as the host computer.
+2. On the host computer, open Command Prompt (press `Win + R`, type `cmd`, press Enter).
+3. Type `ipconfig` and press Enter.
+4. Find **IPv4 Address** under the adapter you are using (Wi-Fi or Ethernet), for example `192.168.1.25`.
+5. Type that address into **Server address (host)** in the app.
+
+If you are on the host computer itself, you can type `localhost` instead.
 
 Click **TEST CONNECTION**. When it says "Connected", click **SAVE & CONTINUE**.
 You can change these later with **Database settings** on the login screen.
