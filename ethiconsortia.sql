@@ -592,6 +592,26 @@ ALTER TABLE `room_warnings`
 ALTER TABLE `sub_room_role_perms`
   ADD CONSTRAINT `sub_room_role_perms_ibfk_1` FOREIGN KEY (`sub_room_id`) REFERENCES `room_sub_rooms` (`sub_room_id`) ON DELETE CASCADE,
   ADD CONSTRAINT `sub_room_role_perms_ibfk_2` FOREIGN KEY (`role_id`) REFERENCES `room_roles` (`role_id`) ON DELETE CASCADE;
+
+CREATE TABLE IF NOT EXISTS `message_tag_edits` (
+  `tag_edit_id` int(11) NOT NULL AUTO_INCREMENT,
+  `message_id` int(11) NOT NULL,
+  `old_tag` varchar(20) NOT NULL,
+  `old_label` varchar(20) DEFAULT NULL,
+  `new_tag` varchar(20) NOT NULL,
+  `new_label` varchar(20) DEFAULT NULL,
+  `edited_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tag_edit_id`),
+  KEY `idx_tag_edits_message` (`message_id`),
+  CONSTRAINT `message_tag_edits_ibfk_1` FOREIGN KEY (`message_id`)
+    REFERENCES `room_messages` (`message_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+ALTER TABLE `room_sub_rooms`
+  ADD COLUMN IF NOT EXISTS `is_deleted` tinyint(1) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS `deleted_at` timestamp NULL DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS `deleted_by` int(11) DEFAULT NULL;
+
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;

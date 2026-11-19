@@ -1003,9 +1003,9 @@ class RoomLobbyFrame(tk.Tk):
                                selectcolor="#1c2a55", activebackground="#1c2a55",
                                activeforeground="white").place(x=6, y=8, width=24, height=24)
                 name = r["room_name"]
-                shown = name if len(name) <= 30 else name[:29] + "\u2026"
+                shown = name if len(name) <= 26 else name[:25] + "\u2026"
                 tk.Label(row_f, text=shown, font=theme.font(12), fg="white", bg="#1c2a55",
-                         anchor="w").place(x=36, y=10, width=320, height=20)
+                         anchor="w").place(x=36, y=10, width=280, height=20)
 
                 def make_open(rr=r):
                     def _open():
@@ -1017,6 +1017,36 @@ class RoomLobbyFrame(tk.Tk):
                 tk.Button(row_f, text="Open", font=theme.font(10, "bold"), fg="white",
                           bg=theme.MEDIUM_BLUE, relief="flat", bd=0, cursor="hand2",
                           command=make_open()).place(x=390, y=8, width=56, height=24)
+                
+                if self.current_role == "admin" and r["department_id"]:
+                    def make_delete(rr=r):
+                        def _delete():
+                            if not messagebox.askyesno(
+                                    "Delete Room",
+                                    f'Permanently delete "{rr["room_name"]}"?\n'
+                                    "All its messages and flagged records are lost. "
+                                    "This cannot be undone!",
+                                    parent=dlg, icon="warning"):
+                                return
+                            try:
+                                c = get_connection()
+                                cu = c.cursor()
+                                cu.execute(
+                                    "DELETE FROM rooms WHERE room_id=%s AND is_archived=1 "
+                                    "AND department_id IS NOT NULL AND department_id <> ''",
+                                    (rr["room_id"],))
+                                cu.close()
+                            except Exception as ex:
+                                messagebox.showerror("Error", str(ex), parent=dlg)
+                                return
+                            load()
+                            self.refresh_rooms()
+                            lbl_status.configure(fg="#50d250", text="\u2713 Room deleted.")
+                        return _delete
+
+                    tk.Button(row_f, text="Delete", font=theme.font(10, "bold"), fg="white",
+                              bg=theme.RED_ACCENT, relief="flat", bd=0, cursor="hand2",
+                              command=make_delete()).place(x=326, y=8, width=56, height=24)
 
         def do_restore():
             ids = [rid for rid, v in checks if v.get()]

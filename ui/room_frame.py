@@ -7,6 +7,7 @@ ui/room_frame.py
     • Room settings (host/admin): permissions, sub-room CRUD, flagged log
 ─────────────────────────────────────────────────────────────
 """
+import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
@@ -137,7 +138,11 @@ class RoomFrame(tk.Toplevel):
         tk.Frame(p, bg="#324878", height=2).place(x=0, y=46, width=220, height=2)
 
         tk.Label(p, text="SUB-ROOMS", font=theme.font(10, "bold"), fg="#8ca5d2",
-                 bg=theme.SUB_ROOM_BG, anchor="w").place(x=12, y=55, width=196, height=16)
+                 bg=theme.SUB_ROOM_BG, anchor="w").place(x=12, y=55, width=120, height=16)
+        if self.is_admin_here:
+            theme.make_button(p, "\U0001F5D1 Deleted", "#28376e", font_size=8, emoji=True,
+                              command=self.open_deleted_sub_rooms
+                              ).place(x=140, y=53, width=70, height=18)
 
         sr_canvas = tk.Canvas(p, bg=theme.SUB_ROOM_BG, highlightthickness=0)
         sr_canvas.place(x=0, y=74, width=220, height=480)
@@ -191,7 +196,7 @@ class RoomFrame(tk.Toplevel):
                 "FROM room_sub_rooms s "
                 "LEFT JOIN users ua ON ua.user_id = s.dm_user_a "
                 "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
-                "WHERE s.room_id=%s ORDER BY s.position ASC",
+                "WHERE s.room_id=%s AND s.is_deleted=0 ORDER BY s.position ASC",
                 (self.room_id,),
             )
             rows = cur.fetchall()
@@ -346,7 +351,7 @@ class RoomFrame(tk.Toplevel):
                 "FROM room_sub_rooms s "
                 "LEFT JOIN users ua ON ua.user_id = s.dm_user_a "
                 "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
-                "WHERE s.sub_room_id=%s AND s.room_id=%s",
+                "WHERE s.sub_room_id=%s AND s.room_id=%s AND s.is_deleted=0",
                 (sr_id, self.room_id),
             )
             r = cur.fetchone()
@@ -604,6 +609,26 @@ class RoomFrame(tk.Toplevel):
         path = imh.choose_attachment(self)
         if not path:
             return
+
+        # file names get the same filter / suspicious check as text
+        spaced = os.path.basename(path).translate(str.maketrans("_-.", "   "))
+        fr = filter_message(spaced, self.room_id)
+        suspicious = find_suspicious(spaced)
+        if fr.was_flagged or suspicious:
+            log_flagged(self.current_user_id, None,
+                        f"[file name] {os.path.basename(path)}",
+                        f"[file name] {fr.censored}",
+                        category="suspicious" if suspicious else "filtered",
+                        sub_room_id=self.selected_sub_room_id)
+            if fr.was_flagged:
+                show_warning_dialog(self, record_warning(self.current_user_id, self.room_id))
+            else:
+                messagebox.showinfo(
+                    "File not sent",
+                    "Your file was not sent. A host or administrator may follow up with you.",
+                    parent=self)
+            return
+
         try:
             mime = imh.guess_mime_any(path)
             if mime.startswith("image/"):
@@ -1346,14 +1371,35 @@ class RoomFrame(tk.Toplevel):
         self.set_message_tag(message_id, "other", label)
 
     def set_message_tag(self, message_id, tag_key, label=None):
-        """Changes the tag of one of the current user's own messages."""
+        """Changes the tag of one of the current user's own messages.
+        Every change is logged and the message shows as 'edited'."""
         try:
             conn = get_connection()
             cur = conn.cursor()
             cur.execute(
-                "UPDATE room_messages SET msg_tag=%s, msg_tag_label=%s "
+                "SELECT msg_tag, msg_tag_label FROM room_messages "
+                "WHERE message_id=%s AND sender_id=%s",
+                (message_id, self.current_user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                cur.close()
+                return
+            old_tag, old_label = row
+            if old_tag == tag_key and (old_label or None) == (label or None):
+                cur.close()
+                return
+            cur.execute(
+                "UPDATE room_messages SET msg_tag=%s, msg_tag_label=%s, "
+                "is_edited=1, edited_at=NOW() "
                 "WHERE message_id=%s AND sender_id=%s",
                 (tag_key, label, message_id, self.current_user_id),
+            )
+            cur.execute(
+                "INSERT INTO message_tag_edits "
+                "(message_id, old_tag, old_label, new_tag, new_label) "
+                "VALUES (%s,%s,%s,%s,%s)",
+                (message_id, old_tag, old_label, tag_key, label),
             )
             cur.close()
             self.refresh_messages()
@@ -1436,14 +1482,16 @@ class RoomFrame(tk.Toplevel):
         label_fr = filter_message(tag_label, self.room_id) if tag_label else None
         label_flagged = bool(label_fr and label_fr.was_flagged)
         filtered = fr.was_flagged or label_flagged
-        suspicious = find_suspicious(raw_content)
+        text_suspicious = find_suspicious(raw_content)
+        label_suspicious = bool(tag_label and find_suspicious(tag_label))
+        suspicious = text_suspicious or label_suspicious
 
         # Banned / filtered / suspicious: never reaches the chat. The admins of this
         # department and the host get an alert and can talk to the sender privately.
         if filtered or suspicious:
             log_flagged(
                 self.current_user_id, None,
-                raw_content if (fr.was_flagged or suspicious) else f"[tag label] {tag_label}",
+                raw_content if (fr.was_flagged or text_suspicious) else f"[tag label] {tag_label}",
                 fr.censored,
                 category="suspicious" if suspicious else "filtered",
                 sub_room_id=self.selected_sub_room_id,
@@ -1585,6 +1633,11 @@ class RoomFrame(tk.Toplevel):
         btn_cancel.place(x=230, y=136, width=110, height=36)
         entry.bind("<Return>", lambda e: save())
 
+    def _tag_text(self, tag, label):
+        if tag == "other" and label:
+            return f"Other: {label}"
+        return TAG_LABELS.get(tag, tag)
+
     def show_edit_history(self, message_id):
         dlg = tk.Toplevel(self)
         dlg.title("Edit History")
@@ -1607,14 +1660,25 @@ class RoomFrame(tk.Toplevel):
                 "WHERE message_id=%s ORDER BY edited_at ASC, edit_id ASC",
                 (message_id,),
             )
-            rows = cur.fetchall()
+            events = [(r["edited_at"],
+                       f'  Before: {r["old_content"]}\n  After:  {r["new_content"]}')
+                      for r in cur.fetchall()]
+            cur.execute(
+                "SELECT old_tag, old_label, new_tag, new_label, edited_at "
+                "FROM message_tag_edits WHERE message_id=%s "
+                "ORDER BY edited_at ASC, tag_edit_id ASC",
+                (message_id,),
+            )
+            events += [(r["edited_at"],
+                        f'  Tag: {self._tag_text(r["old_tag"], r["old_label"])}'
+                        f'  \u2192  {self._tag_text(r["new_tag"], r["new_label"])}')
+                       for r in cur.fetchall()]
             cur.close()
-            if not rows:
+            events.sort(key=lambda e: e[0])
+            if not events:
                 txt.insert(tk.END, "No edits recorded.")
-            for r in rows:
-                txt.insert(tk.END, f'{theme.fmt_datetime(r["edited_at"])}\n'
-                                   f'  Before: {r["old_content"]}\n'
-                                   f'  After:  {r["new_content"]}\n\n')
+            for when, body in events:
+                txt.insert(tk.END, f'{theme.fmt_datetime(when)}\n{body}\n\n')
         except Exception as ex:
             txt.insert(tk.END, f"Error loading history: {ex}")
         txt.configure(state="disabled")
@@ -1919,7 +1983,8 @@ class RoomFrame(tk.Toplevel):
                     "FROM room_sub_rooms s "
                     "LEFT JOIN users ua ON ua.user_id = s.dm_user_a "
                     "LEFT JOIN users ub ON ub.user_id = s.dm_user_b "
-                    "WHERE s.room_id=%s AND (s.sub_room_type_detail='public' OR %s) "
+                    "WHERE s.room_id=%s AND s.is_deleted=0 "
+                    "AND (s.sub_room_type_detail='public' OR %s) "
                     "ORDER BY s.position ASC",
                     (self.room_id, self.is_admin_here),
                 )
@@ -1950,7 +2015,11 @@ class RoomFrame(tk.Toplevel):
                             def _del():
                                 if messagebox.askyesno(
                                         "Delete Sub-Room",
-                                        f'Delete "{name}"? All messages will be lost.',
+                                        f'Delete "{name}"? ' + (
+                                            "Members will no longer see it. "
+                                            "Administrators can still read it."
+                                            if self._room_has_department()
+                                            else "All messages will be lost."),
                                         parent=dlg):
                                     self.delete_sub_room(srid)
                                     if srid == self.selected_sub_room_id:
@@ -2009,7 +2078,7 @@ class RoomFrame(tk.Toplevel):
                                                  dlg, room_only=True))
             btn_flagged.place(x=20, y=480, width=220, height=28)
 
-        if self.my_room_role == "host" or self.is_admin_here:
+        if self.my_room_role == "host" and not self._room_has_department():
             def do_delete_room():
                 if messagebox.askyesno(
                         "Delete Room",
@@ -2573,24 +2642,125 @@ class RoomFrame(tk.Toplevel):
             messagebox.showerror("Error", f"Error adding sub-room: {ex}", parent=self)
             return None
 
+    def open_deleted_sub_rooms(self):
+        """Admins only: read-only view of sub-rooms a host deleted in this room."""
+        if not self.is_admin_here:
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title("Deleted Sub-Rooms")
+        dlg.geometry("660x470")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg=theme.SUB_ROOM_BG)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text="Deleted sub-rooms  \u2014  read-only, admins only",
+                 font=theme.font(12, "bold"), fg="white", bg=theme.SUB_ROOM_BG,
+                 anchor="w").place(x=14, y=12, width=630, height=22)
+        lb = tk.Listbox(dlg, bg="#1c2a55", fg="#ff9a9a", font=theme.font(11),
+                        selectbackground=theme.MEDIUM_BLUE, exportselection=False,
+                        highlightthickness=1, highlightbackground=theme.MEDIUM_BLUE)
+        lb.place(x=14, y=44, width=200, height=370)
+        txt = tk.Text(dlg, wrap="word", font=theme.font(11), bg="#1c2a55", fg="white",
+                      relief="flat", padx=8, pady=8, state="disabled")
+        txt.place(x=224, y=44, width=422, height=370)
+
+        def write(text):
+            txt.configure(state="normal")
+            txt.delete("1.0", tk.END)
+            txt.insert(tk.END, text)
+            txt.configure(state="disabled")
+
+        subs = []   # (sub_room_id, name, deleted_at, deleted_by_name)
+        try:
+            conn = get_connection()
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                "SELECT s.sub_room_id, s.sub_room_name, s.deleted_at, "
+                "COALESCE(NULLIF(u.full_name,''), u.username) AS by_name "
+                "FROM room_sub_rooms s LEFT JOIN users u ON u.user_id = s.deleted_by "
+                "WHERE s.room_id=%s AND s.is_deleted=1 ORDER BY s.deleted_at DESC",
+                (self.room_id,))
+            for r in cur.fetchall():
+                subs.append((r["sub_room_id"], r["sub_room_name"], r["deleted_at"], r["by_name"]))
+                lb.insert(tk.END, f"[DELETED] {r['sub_room_name']}")
+            cur.close()
+        except Exception as ex:
+            messagebox.showerror("Error", str(ex), parent=dlg)
+        if not subs:
+            write("No deleted sub-rooms.")
+
+        def show(_e=None):
+            sel = lb.curselection()
+            if not sel:
+                return
+            sr_id, name, when, by = subs[sel[0]]
+            out = [f"[DELETED] {name}",
+                   f"Deleted {theme.fmt_datetime(when) if when else '?'} by {by or '?'}", ""]
+            try:
+                conn = get_connection()
+                cur = conn.cursor(dictionary=True)
+                cur.execute(
+                    "SELECT COALESCE(NULLIF(u.full_name,''), u.username) AS who, "
+                    "m.content, m.msg_type, m.sent_at, m.is_edited "
+                    "FROM room_messages m JOIN users u ON u.user_id = m.sender_id "
+                    "WHERE m.sub_room_id=%s ORDER BY m.sent_at ASC", (sr_id,))
+                for m in cur.fetchall():
+                    body = (m["content"] if m["msg_type"] in ("text", "emote")
+                            else f'[{m["msg_type"]}]')
+                    out.append(f'{theme.fmt_datetime(m["sent_at"])}  {m["who"]}'
+                               f'{"  (edited)" if m["is_edited"] else ""}\n  {body}\n')
+                cur.close()
+            except Exception as ex:
+                out.append(f"Error: {ex}")
+            write("\n".join(out))
+
+        lb.bind("<<ListboxSelect>>", show)
+        theme.make_button(dlg, "Close", "#28376e", font_size=11,
+                          command=dlg.destroy).place(x=270, y=422, width=120, height=32)
+
     def delete_sub_room(self, sr_id):
+        """Department room: hide it, admins can still read it.
+        Room with no department: no admins exist, so delete for good."""
         try:
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute("DELETE FROM room_messages WHERE sub_room_id=%s", (sr_id,))
-            cur.execute("DELETE FROM room_sub_rooms WHERE sub_room_id=%s", (sr_id,))
+            if self._room_has_department():
+                cur.execute(
+                    "UPDATE room_sub_rooms SET is_deleted=1, deleted_at=NOW(), deleted_by=%s "
+                    "WHERE sub_room_id=%s AND room_id=%s AND sub_room_type_detail='public'",
+                    (self.current_user_id, sr_id, self.room_id))
+            else:
+                cur.execute("DELETE FROM room_messages WHERE sub_room_id=%s", (sr_id,))
+                cur.execute("DELETE FROM room_sub_rooms WHERE sub_room_id=%s AND room_id=%s",
+                            (sr_id, self.room_id))
             cur.close()
         except Exception as ex:
             messagebox.showerror("Error", f"Error deleting sub-room: {ex}", parent=self)
 
     def delete_room(self):
+        """Only the host of a room with NO department can delete it for good.
+        Department rooms are archived; an administrator deletes them from the
+        lobby's Archived Rooms window."""
         try:
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute("DELETE FROM rooms WHERE room_id=%s", (self.room_id,))
+            cur.execute(
+                "DELETE FROM rooms WHERE room_id=%s AND host_id=%s "
+                "AND (department_id IS NULL OR department_id = '')",
+                (self.room_id, self.current_user_id),
+            )
+            deleted = cur.rowcount > 0
             cur.close()
         except Exception as ex:
             messagebox.showerror("Error", str(ex), parent=self)
+            return
+        if not deleted:
+            messagebox.showwarning(
+                "Not allowed",
+                "Department rooms can't be deleted by the host.\n"
+                "Archive the room instead. An administrator can delete it from the archive.",
+                parent=self)
             return
         self.stop_polling()
         self.destroy()
