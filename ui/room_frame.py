@@ -63,6 +63,7 @@ class RoomFrame(tk.Toplevel):
         self.selected_dm_partner_id = -1
         self.selected_sub_room_type = "text"
         self._polling_job = None
+        self._pending = None            # attachment waiting for Send (emote/image/file/video)
         self._img_refs = []  # keep PhotoImage references alive
         self._last_msg_sig = None       # what the chat currently shows
         self._last_members_sig = None   # what the members list currently shows
@@ -308,6 +309,7 @@ class RoomFrame(tk.Toplevel):
         return row
 
     def select_sub_room(self, ch_id, ch_name, is_private, dm_partner_id):
+        self.clear_pending()
         self.selected_sub_room_id = ch_id
         self.selected_sub_room_name = ch_name
         self.selected_is_private = is_private
@@ -523,6 +525,16 @@ class RoomFrame(tk.Toplevel):
         self.bind("<Button-4>", self._on_mousewheel, add="+")
         self.bind("<Button-5>", self._on_mousewheel, add="+")
 
+        # Pending attachment chip (shown just above the input bar)
+        self.pending_chip = tk.Frame(p, bg="#d2deF5", highlightbackground=theme.SOFT_BLUE,
+                                      highlightthickness=1)
+        self.lbl_pending = tk.Label(self.pending_chip, text="", font=theme.font(11, emoji=True),
+                                     fg=theme.DARK_NAVY, bg="#d2deF5", anchor="w")
+        self.lbl_pending.place(x=10, y=6, width=520, height=22)
+        tk.Button(self.pending_chip, text="\u2716", font=theme.font(10, "bold", emoji=True),
+                  fg="white", bg=theme.RED_ACCENT, relief="flat", bd=0, cursor="hand2",
+                  command=self.clear_pending).place(x=548, y=5, width=26, height=24)
+
         # Input bar
         input_bar = tk.Frame(p, bg=theme.INPUT_BG)
         input_bar.place(x=0, y=636, width=600, height=64)
@@ -533,7 +545,7 @@ class RoomFrame(tk.Toplevel):
 
         btn_emoji = self._make_input_icon_button(input_bar, "\u263A", "Emotes")
         btn_emoji.place(x=55, y=14, width=42, height=36)
-        btn_emoji.configure(command=lambda: emote_picker.show(btn_emoji, self.send_emote))
+        btn_emoji.configure(command=lambda: emote_picker.show(btn_emoji, self.insert_emote))
 
         self.txt_message = tk.Entry(input_bar, font=theme.font(12), fg="gray", bg="white",
                                      relief="solid", bd=1, highlightthickness=1,
@@ -578,27 +590,30 @@ class RoomFrame(tk.Toplevel):
         theme.add_hover(btn, theme.INPUT_BG, "#c8d7f5")
         return btn
 
-    def send_emote(self, emote):
+    def set_pending(self, msg_type, stored, label, name=None):
+        """Queues an attachment. Nothing is sent until the user presses Send."""
+        self._pending = {"type": msg_type, "content": stored, "name": name}
+        self.lbl_pending.configure(text=label)
+        self.pending_chip.place(x=0, y=598, width=600, height=36)
+        self.pending_chip.lift()
+        self.txt_message.focus_set()
+
+    def clear_pending(self):
+        self._pending = None
+        self.pending_chip.place_forget()
+
+    def insert_emote(self, emote):
+        """Puts the emoji into the message box at the cursor. Nothing is sent."""
         if self.selected_sub_room_id == -1:
             messagebox.showinfo("Info", "Please select a sub-room first.", parent=self)
             return
-        if not self._check_can_post():
-            return
-        try:
-            conn = get_connection()
-            cur = conn.cursor()
-            receiver_id = self.selected_dm_partner_id if (self.selected_is_private and
-                                                            self.selected_dm_partner_id != -1) else None
-            cur.execute(
-                "INSERT INTO room_messages (sub_room_id, sender_id, content, msg_type, "
-                "is_private, receiver_id) VALUES (%s,%s,%s,'emote',%s,%s)",
-                (self.selected_sub_room_id, self.current_user_id, emote,
-                 1 if self.selected_is_private else 0, receiver_id),
-            )
-            cur.close()
-            self.refresh_messages()
-        except Exception as ex:
-            messagebox.showerror("Error", f"Error sending emote: {ex}", parent=self)
+        if str(self.txt_message.cget("state")) == "disabled":
+            return                      # banned or restricted: box is locked
+        if self.txt_message.get() == "Type a message...":
+            self.txt_message.delete(0, tk.END)
+            self.txt_message.configure(fg=theme.DARK_NAVY)
+        self.txt_message.insert(tk.INSERT, emote)
+        self.txt_message.focus_set()
 
     def open_image_chooser(self):
         if self.selected_sub_room_id == -1:
@@ -609,60 +624,22 @@ class RoomFrame(tk.Toplevel):
         path = imh.choose_attachment(self)
         if not path:
             return
-
-        # file names get the same filter / suspicious check as text
-        spaced = os.path.basename(path).translate(str.maketrans("_-.", "   "))
-        fr = filter_message(spaced, self.room_id)
-        suspicious = find_suspicious(spaced)
-        if fr.was_flagged or suspicious:
-            log_flagged(self.current_user_id, None,
-                        f"[file name] {os.path.basename(path)}",
-                        f"[file name] {fr.censored}",
-                        category="suspicious" if suspicious else "filtered",
-                        sub_room_id=self.selected_sub_room_id)
-            if fr.was_flagged:
-                show_warning_dialog(self, record_warning(self.current_user_id, self.room_id))
-            else:
-                messagebox.showinfo(
-                    "File not sent",
-                    "Your file was not sent. A host or administrator may follow up with you.",
-                    parent=self)
-            return
-
         try:
             mime = imh.guess_mime_any(path)
             if mime.startswith("image/"):
                 msg_type = "image"
                 stored = f"{mime}|{imh.file_to_base64_raw(path)}"
+                icon = "\U0001F5BC"
             else:
                 msg_type = "video" if mime.startswith("video/") else "file"
                 stored = imh.encode_attachment(path)
-
-            conn = get_connection()
-            cur = conn.cursor()
-            receiver_id = self.selected_dm_partner_id if (self.selected_is_private and
-                                                            self.selected_dm_partner_id != -1) else None
-            cur.execute(
-                "INSERT INTO room_messages (sub_room_id, sender_id, content, msg_type, "
-                "is_private, receiver_id) VALUES (%s,%s,%s,%s,%s,%s)",
-                (self.selected_sub_room_id, self.current_user_id, stored, msg_type,
-                 1 if self.selected_is_private else 0, receiver_id),
-            )
-            cur.close()
-            self.refresh_messages()
+                icon = "\U0001F3AC" if msg_type == "video" else "\U0001F4C4"
         except Exception as ex:
-            # 1153 = packet too large; 2006/2013 = server dropped the connection,
-            # which MySQL sometimes does instead when a packet is too big
-            if (getattr(ex, "errno", None) in (1153, 2006, 2013)
-                    or "max_allowed_packet" in str(ex)):
-                messagebox.showerror(
-                    "File Too Large for the Server",
-                    "The database rejected this file because it is bigger than the "
-                    "server's packet limit (or the connection dropped while sending).\n\n"
-                    "Try a smaller file, or ask whoever runs the database to raise "
-                    "max_allowed_packet.", parent=self)
-            else:
-                messagebox.showerror("Error", f"Error sending file: {ex}", parent=self)
+            messagebox.showerror("Error", f"Can't read that file: {ex}", parent=self)
+            return
+        name = os.path.basename(path)
+        shown = name if len(name) <= 50 else name[:47] + "..."
+        self.set_pending(msg_type, stored, f"{icon}   {shown}", name)
 
     # ═════════════════════════════════════════════════════════════════
     #  MEMBERS SIDEBAR
@@ -989,7 +966,7 @@ class RoomFrame(tk.Toplevel):
                 """
                 SELECT u.user_id, u.username, u.full_name, u.role AS sys_role,
                        m.message_id, m.sender_id, m.is_edited, m.msg_tag, m.msg_tag_label,
-                       m.content, m.sent_at, m.is_private,
+                       m.content, m.caption, m.sent_at, m.is_private,
                        COALESCE(m.msg_type, 'text') AS msg_type
                 FROM room_messages m
                 JOIN users u ON m.sender_id = u.user_id
@@ -1014,7 +991,7 @@ class RoomFrame(tk.Toplevel):
         # 2) nothing changed -> don't touch the screen
         sig = (self.selected_sub_room_id,
                tuple((r["message_id"], r["is_edited"], r["msg_tag"], r["msg_tag_label"],
-                      hash(r["content"])) for r in rows))
+                      hash(r["content"]), r["caption"]) for r in rows))
         if sig == self._last_msg_sig:
             return
 
@@ -1057,7 +1034,8 @@ class RoomFrame(tk.Toplevel):
             bubble = self._build_bubble(fn, sys_role, content, time_str, is_me, priv,
                                          r["msg_type"], r["message_id"], r["sender_id"],
                                          r["is_edited"], tag=r["msg_tag"],
-                                         tag_label=r["msg_tag_label"])
+                                         tag_label=r["msg_tag_label"],
+                                         caption=r["caption"])
             bubble.pack(fill="x", pady=(0, 5))
 
         self.after(50, lambda: self._scroll_chat(top if keep_pos else 1.0))
@@ -1113,7 +1091,8 @@ class RoomFrame(tk.Toplevel):
         return wrap
 
     def _build_bubble(self, fn, sys_role, content, time_str, is_me, is_private, msg_type,
-                      message_id, sender_id, is_edited, tag="none", tag_label=None):
+                      message_id, sender_id, is_edited, tag="none", tag_label=None,
+                      caption=None):
         outer = tk.Frame(self.chat_messages_panel, bg=theme.CHAT_BG)
 
         if is_private:
@@ -1158,9 +1137,6 @@ class RoomFrame(tk.Toplevel):
             else:
                 tk.Label(bubble, text="[Image could not be displayed]", bg=bubble_bg,
                          font=theme.font(11)).pack(padx=12, pady=4)
-        elif msg_type == "emote":
-            tk.Label(bubble, text=content, font=theme.font(38, emoji=True),
-                     bg=bubble_bg).pack(padx=12, pady=4)
         elif msg_type in ("file", "video"):
             att = imh.decode_attachment(content)
             if att:
@@ -1196,6 +1172,11 @@ class RoomFrame(tk.Toplevel):
             tk.Label(bubble, text=content, font=theme.font(12), fg=theme.DARK_NAVY, bg=bubble_bg,
                      anchor="w", justify="left", wraplength=320).pack(fill="x", padx=12, pady=4)
 
+        if caption and msg_type != "text":
+            tk.Label(bubble, text=caption, font=theme.font(12), fg=theme.DARK_NAVY,
+                     bg=bubble_bg, anchor="w", justify="left",
+                     wraplength=320).pack(fill="x", padx=12, pady=(0, 4))
+
         footer = tk.Frame(bubble, bg=bubble_bg)
         footer.pack(fill="x", padx=12, pady=(0, 7))
         tk.Label(footer, text=time_str, font=theme.font(8), fg="gray",
@@ -1208,15 +1189,20 @@ class RoomFrame(tk.Toplevel):
             lbl_edited.pack(side="left")
             lbl_edited.bind("<Button-1>", lambda e, mid=message_id: self.show_edit_history(mid))
 
-        # Only the original sender (and only text messages) gets the Edit link
-        if sender_id == self.current_user_id and msg_type == "text":
-            lbl_edit = tk.Label(footer, text="  Edit", font=theme.font(8, "bold"),
+        # Only the original sender gets the Edit link: text for text messages,
+        # caption for attachments and emotes
+        if sender_id == self.current_user_id:
+            is_text = msg_type == "text"
+            edit_txt = "  Edit" if (is_text or caption) else "  Add caption"
+            lbl_edit = tk.Label(footer, text=edit_txt, font=theme.font(8, "bold"),
                                  fg=theme.MEDIUM_BLUE, bg=bubble_bg, cursor="hand2")
             lbl_edit.pack(side="left")
-            lbl_edit.bind("<Button-1>",
-                          lambda e, mid=message_id, c=content: self.open_edit_dialog(mid, c))
+            lbl_edit.bind(
+                "<Button-1>",
+                lambda e, mid=message_id, c=(content if is_text else (caption or "")),
+                       cap=not is_text: self.open_edit_dialog(mid, c, cap))
 
-        can_tag = sender_id == self.current_user_id and msg_type == "text"
+        can_tag = sender_id == self.current_user_id
         dots = None
 
         if is_me:
@@ -1431,6 +1417,7 @@ class RoomFrame(tk.Toplevel):
         type; only restores the grey placeholder text if focus has left
         it, so the placeholder never gets typed into by mistake."""
         self.txt_message.delete(0, tk.END)
+        self.clear_pending()
         self.cmb_tag.set(TAG_LABELS["none"])
         self._clear_tag_label()
         self._on_tag_change()
@@ -1446,7 +1433,10 @@ class RoomFrame(tk.Toplevel):
             return
 
         raw_content = self.txt_message.get().strip()
-        if not raw_content or raw_content == "Type a message...":
+        if raw_content == "Type a message...":
+            raw_content = ""
+        pending = self._pending
+        if not raw_content and not pending:
             return
 
         # Tag validation: "Other" requires a label
@@ -1475,24 +1465,40 @@ class RoomFrame(tk.Toplevel):
             )
             return
 
-        if not self._check_can_post():
+        if not self._check_can_post(upload=bool(pending)):
             return
 
         fr = filter_message(raw_content, self.room_id)
         label_fr = filter_message(tag_label, self.room_id) if tag_label else None
         label_flagged = bool(label_fr and label_fr.was_flagged)
-        filtered = fr.was_flagged or label_flagged
         text_suspicious = find_suspicious(raw_content)
         label_suspicious = bool(tag_label and find_suspicious(tag_label))
-        suspicious = text_suspicious or label_suspicious
 
-        # Banned / filtered / suspicious: never reaches the chat. The admins of this
-        # department and the host get an alert and can talk to the sender privately.
+        # file names get the same checks as text
+        name_text = ""
+        if pending and pending.get("name"):
+            name_text = pending["name"].translate(str.maketrans("_-.", "   "))
+        name_fr = filter_message(name_text, self.room_id) if name_text else None
+        name_flagged = bool(name_fr and name_fr.was_flagged)
+        name_suspicious = bool(name_text and find_suspicious(name_text))
+
+        filtered = fr.was_flagged or label_flagged or name_flagged
+        suspicious = text_suspicious or label_suspicious or name_suspicious
+
+        # Banned / filtered / suspicious: never reaches the chat (attachment included).
+        # The admins of this department and the host get an alert and can talk to the
+        # sender privately.
         if filtered or suspicious:
+            if fr.was_flagged or text_suspicious:
+                logged, logged_censored = raw_content, fr.censored
+            elif name_flagged or name_suspicious:
+                logged = f"[file name] {pending['name']}"
+                logged_censored = f"[file name] {name_fr.censored}"
+            else:
+                logged = f"[tag label] {tag_label}"
+                logged_censored = f"[tag label] {label_fr.censored}"
             log_flagged(
-                self.current_user_id, None,
-                raw_content if (fr.was_flagged or text_suspicious) else f"[tag label] {tag_label}",
-                fr.censored,
+                self.current_user_id, None, logged, logged_censored,
                 category="suspicious" if suspicious else "filtered",
                 sub_room_id=self.selected_sub_room_id,
             )
@@ -1501,6 +1507,7 @@ class RoomFrame(tk.Toplevel):
                 show_warning_dialog(self, warn_count)
                 if is_banned(self.current_user_id, self.room_id):
                     self.txt_message.delete(0, tk.END)
+                    self.clear_pending()
                     self.txt_message.configure(fg="gray", state="disabled")
                     self.btn_send.configure(state="disabled")
                     return
@@ -1517,10 +1524,16 @@ class RoomFrame(tk.Toplevel):
             cur = conn.cursor()
             receiver_id = self.selected_dm_partner_id if (self.selected_is_private and
                                                             self.selected_dm_partner_id != -1) else None
+            if pending:
+                msg_type, content = pending["type"], pending["content"]
+                caption = raw_content or None
+            else:
+                msg_type, content, caption = "text", raw_content, None
             cur.execute(
-                "INSERT INTO room_messages (sub_room_id, sender_id, content, is_private, "
-                "receiver_id, msg_tag, msg_tag_label) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                (self.selected_sub_room_id, self.current_user_id, raw_content,
+                "INSERT INTO room_messages (sub_room_id, sender_id, content, msg_type, caption, "
+                "is_private, receiver_id, msg_tag, msg_tag_label) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.selected_sub_room_id, self.current_user_id, content, msg_type, caption,
                  1 if self.selected_is_private else 0, receiver_id, tag_key, tag_label),
             )
             cur.close()
@@ -1529,12 +1542,23 @@ class RoomFrame(tk.Toplevel):
             self.refresh_messages()
 
         except Exception as ex:
-            messagebox.showerror("Error", f"Error sending: {ex}", parent=self)
+            # 1153 = packet too large; 2006/2013 = server dropped the connection,
+            # which MySQL sometimes does instead when a packet is too big
+            if (getattr(ex, "errno", None) in (1153, 2006, 2013)
+                    or "max_allowed_packet" in str(ex)):
+                messagebox.showerror(
+                    "File Too Large for the Server",
+                    "The database rejected this file because it is bigger than the "
+                    "server's packet limit (or the connection dropped while sending).\n\n"
+                    "Try a smaller file, or ask whoever runs the database to raise "
+                    "max_allowed_packet.", parent=self)
+            else:
+                messagebox.showerror("Error", f"Error sending: {ex}", parent=self)
 
     # ═════════════════════════════════════════════════════════════════
     #  EDIT MESSAGE + EDIT HISTORY
     # ═════════════════════════════════════════════════════════════════
-    def open_edit_dialog(self, message_id, current_content):
+    def open_edit_dialog(self, message_id, current_content, is_caption=False):
         dlg = tk.Toplevel(self)
         dlg.title("Edit Message")
         dlg.geometry("440x210")
@@ -1574,9 +1598,11 @@ class RoomFrame(tk.Toplevel):
                 cur = conn.cursor()
 
                 # Re-read from the DB: confirms ownership and gets the true "before" text
+                col = "caption" if is_caption else "content"
                 cur.execute(
-                    "SELECT content FROM room_messages "
-                    "WHERE message_id=%s AND sender_id=%s AND msg_type='text'",
+                    f"SELECT {col} FROM room_messages "
+                    "WHERE message_id=%s AND sender_id=%s"
+                    + ("" if is_caption else " AND msg_type='text'"),
                     (message_id, self.current_user_id),
                 )
                 row = cur.fetchone()
@@ -1584,7 +1610,7 @@ class RoomFrame(tk.Toplevel):
                     cur.close()
                     status.configure(text="You can only edit your own messages.")
                     return
-                old_content = row[0]
+                old_content = row[0] or ""
 
                 if new_text == old_content:
                     cur.close()
@@ -1609,7 +1635,7 @@ class RoomFrame(tk.Toplevel):
                 final_content = new_text
 
                 cur.execute(
-                    "UPDATE room_messages SET content=%s, is_edited=1, edited_at=NOW() "
+                    f"UPDATE room_messages SET {col}=%s, is_edited=1, edited_at=NOW() "
                     "WHERE message_id=%s AND sender_id=%s",
                     (final_content, message_id, self.current_user_id),
                 )
@@ -1661,7 +1687,7 @@ class RoomFrame(tk.Toplevel):
                 (message_id,),
             )
             events = [(r["edited_at"],
-                       f'  Before: {r["old_content"]}\n  After:  {r["new_content"]}')
+                       f'  Before: {r["old_content"] or "(no caption)"}\n  After:  {r["new_content"]}')
                       for r in cur.fetchall()]
             cur.execute(
                 "SELECT old_tag, old_label, new_tag, new_label, edited_at "
@@ -2702,12 +2728,13 @@ class RoomFrame(tk.Toplevel):
                 cur = conn.cursor(dictionary=True)
                 cur.execute(
                     "SELECT COALESCE(NULLIF(u.full_name,''), u.username) AS who, "
-                    "m.content, m.msg_type, m.sent_at, m.is_edited "
+                    "m.content, m.caption, m.msg_type, m.sent_at, m.is_edited "
                     "FROM room_messages m JOIN users u ON u.user_id = m.sender_id "
                     "WHERE m.sub_room_id=%s ORDER BY m.sent_at ASC", (sr_id,))
                 for m in cur.fetchall():
-                    body = (m["content"] if m["msg_type"] in ("text", "emote")
-                            else f'[{m["msg_type"]}]')
+                    body = (m["content"] if m["msg_type"] == "text"
+                            else f'[{m["msg_type"]}]'
+                            + (f'  {m["caption"]}' if m["caption"] else ""))
                     out.append(f'{theme.fmt_datetime(m["sent_at"])}  {m["who"]}'
                                f'{"  (edited)" if m["is_edited"] else ""}\n  {body}\n')
                 cur.close()
