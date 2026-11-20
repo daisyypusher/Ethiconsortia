@@ -2,57 +2,95 @@
 ui/emote_picker.py
 ─────────────────────────────────────────────────────────────
 Usage:
-    EmotePicker.show(anchor_widget, on_select=lambda emoji: ...)
+    emote_picker.show(anchor_widget, on_select=lambda emoji: ...)
+    emote_picker.close()
+    emote_picker.lift()
+
+Emoji come from data/emoji.json (Emojibase, MIT). Category tabs on top,
+a search box under them, one scrolling grid below.
 ─────────────────────────────────────────────────────────────
 """
+import json
+import os
+import re
+import sys
 import tkinter as tk
-from tkinter import font as tkfont
+from tkinter import messagebox
 
 from ui import theme
 
-CAT_NAMES = ["\U0001F60A Faces", "\U0001F44D Gestures", "\u2764\uFE0F Hearts",
-             "\U0001F389 Celebrate", "\U0001F4DA School", "\U0001F31F Misc"]
+# Newest Unicode emoji version your Windows can draw. Empty boxes in the
+# picker mean this is too high: lower it (12.1 for Windows 10).
+MAX_VERSION = 14.0
 
-CAT_EMOTES = [
-    # Faces
-    ["\U0001F60A", "\U0001F602", "\U0001F60D", "\U0001F97A", "\U0001F60E", "\U0001F62D",
-     "\U0001F914", "\U0001F605", "\U0001F601", "\U0001F973",
-     "\U0001F622", "\U0001F624", "\U0001F929", "\U0001F60F", "\U0001F61C", "\U0001F917",
-     "\U0001F636", "\U0001F62C", "\U0001F644", "\U0001F634"],
-    # Gestures
-    ["\U0001F44D", "\U0001F44E", "\U0001F44F", "\U0001F64C", "\U0001F91D", "\u270C\uFE0F",
-     "\U0001F91E", "\U0001F44B", "\U0001F919", "\U0001F4AA",
-     "\U0001FAF6", "\U0001F91C", "\U0001F91B", "\U0001F44C", "\U0001F90C", "\U0001FAE1",
-     "\U0001FAC2", "\U0001F64F", "\U0001F448", "\U0001F446"],
-    # Hearts
-    ["\u2764\uFE0F", "\U0001F9E1", "\U0001F49B", "\U0001F49A", "\U0001F499", "\U0001F49C",
-     "\U0001F5A4", "\U0001F90D", "\U0001F495", "\U0001F49E",
-     "\U0001F493", "\U0001F497", "\U0001F496", "\U0001F49D", "\U0001F498", "\u2763\uFE0F",
-     "\U0001F494", "\U0001FAC0", "\u2665\uFE0F", "\u2764\uFE0F\u200D\U0001F525"],
-    # Celebrate
-    ["\U0001F389", "\U0001F38A", "\U0001F973", "\U0001F388", "\U0001F381", "\U0001F3C6",
-     "\U0001F947", "\U0001F3AF", "\U0001F386", "\U0001F387",
-     "\u2728", "\U0001F31F", "\u2B50", "\U0001F308", "\U0001F380", "\U0001F397\uFE0F",
-     "\U0001F396\uFE0F", "\U0001F3AE", "\U0001F3B8", "\U0001F3BA"],
-    # School
-    ["\U0001F4DA", "\U0001F4D6", "\u270F\uFE0F", "\U0001F4DD", "\U0001F58A\uFE0F", "\U0001F4D0",
-     "\U0001F4CF", "\U0001F52C", "\U0001F52D", "\U0001F9EA",
-     "\U0001F9EC", "\U0001F4A1", "\U0001F4CA", "\U0001F4C8", "\U0001F5A5\uFE0F", "\U0001F4BB",
-     "\U0001F5A8\uFE0F", "\U0001F4D3", "\U0001F3EB", "\U0001F393"],
-    # Misc
-    ["\U0001F30D", "\U0001F319", "\u2600\uFE0F", "\U0001F30A", "\U0001F525", "\U0001F4A5",
-     "\u26A1", "\u2744\uFE0F", "\U0001F338", "\U0001F340",
-     "\U0001F436", "\U0001F431", "\U0001F98A", "\U0001F43C", "\U0001F981", "\U0001F355",
-     "\U0001F354", "\u2615", "\U0001F3B5", "\U0001F680"],
+# Emojibase groups: 0 smileys, 1 people, 3 animals, 4 food, 5 travel,
+# 6 activities, 7 objects, 8 symbols. Skipped: 2 (skin-tone parts), 9 (flags,
+# which Windows draws as plain letters).
+GROUPS = [
+    (0, "\U0001F60A"), (1, "\U0001F44D"), (3, "\U0001F436"), (4, "\U0001F354"),
+    (5, "\U0001F697"), (6, "\u26BD"), (7, "\U0001F4A1"), (8, "\u2764\uFE0F"),
 ]
+COLS, CELL = 7, 46
+PLACEHOLDER = "Search emotes\u2026"
+_WORD = re.compile(r"[a-z0-9]+")
 
+_data = None            # loaded once: {"groups": {id: [entry]}, "all": [entry]}
 _active_popup = None
-_esc_binding = None     # (window, binding id) of the Esc key binding
+_esc_binding = None     # (window, [(sequence, binding id), ...])
+
+
+def _data_file():
+    base = getattr(sys, "_MEIPASS",
+                   os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "data", "emoji.json")
+
+
+def _load():
+    """Reads data/emoji.json once. Entry = (emoji, label words, all search words)."""
+    global _data
+    if _data is not None:
+        return _data
+    with open(_data_file(), encoding="utf-8") as f:
+        raw = json.load(f)
+    raw.sort(key=lambda e: e.get("order", 0))
+    groups = {g: [] for g, _icon in GROUPS}
+    everything = []
+    for e in raw:
+        g, em = e.get("group"), e.get("emoji", "")
+        if g not in groups or not em:
+            continue
+        if e.get("version", 0) > MAX_VERSION:
+            continue
+        if "\u200d" in em:          # joined emoji: Tk draws them as separate pieces
+            continue
+        label_words = set(_WORD.findall(e.get("label", "").lower()))
+        words = set(label_words)
+        for tag in e.get("tags", []):
+            words.update(_WORD.findall(tag.lower()))
+        entry = (em, label_words, words)
+        groups[g].append(entry)
+        everything.append(entry)
+    _data = {"groups": groups, "all": everything}
+    return _data
+
+
+def _search(query):
+    """Every typed word must start a label word or tag. Name matches come first."""
+    terms = _WORD.findall(query.lower())
+    if not terms:
+        return []
+    hits = []
+    for pos, (em, label_words, words) in enumerate(_load()["all"]):
+        if all(any(w.startswith(t) for w in words) for t in terms):
+            in_name = all(any(w.startswith(t) for w in label_words) for t in terms)
+            hits.append((0 if in_name else 1, pos, em))
+    hits.sort()
+    return [h[2] for h in hits]
 
 
 def show(anchor, on_select):
-    """Shows (or, on a second call, closes) the categorized emote picker
-    positioned above the given anchor widget."""
+    """Shows (or, on a second call, closes) the emote picker above the anchor.
+    It stays open until closed: X button, Esc, the anchor button again, or close()."""
     global _active_popup, _esc_binding
 
     if _active_popup is not None and _active_popup.winfo_exists():
@@ -60,13 +98,20 @@ def show(anchor, on_select):
         return
 
     root = anchor.winfo_toplevel()
+    try:
+        data = _load()
+    except (OSError, ValueError) as ex:
+        messagebox.showerror("Emoji data missing",
+                             f"Can't read data/emoji.json:\n{ex}", parent=root)
+        return
+
     popup = tk.Toplevel(root)
     _active_popup = popup
     popup.overrideredirect(True)
     popup.configure(bg=theme.INPUT_BG)
 
     main = tk.Frame(popup, bg=theme.INPUT_BG, highlightbackground=theme.SOFT_BLUE,
-                     highlightthickness=1)
+                    highlightthickness=1)
     main.pack(fill="both", expand=True)
 
     tab_row = tk.Frame(main, bg=theme.DARK_NAVY)
@@ -75,80 +120,131 @@ def show(anchor, on_select):
               bg=theme.RED_ACCENT, fg="white", relief="flat", bd=0, cursor="hand2",
               command=close).pack(side="right", fill="y")
 
-    cards = tk.Frame(main, bg=theme.INPUT_BG)
-    cards.pack(side="top", fill="both", expand=True)
+    # search box sits above the grid, so the grid can never push it out
+    search_var = tk.StringVar(value=PLACEHOLDER)
+    search = tk.Entry(main, textvariable=search_var, font=theme.font(11), fg="gray",
+                      relief="flat", highlightthickness=1,
+                      highlightbackground=theme.SOFT_BLUE)
+    search.pack(side="top", fill="x", padx=1, pady=1)
 
-    card_frames = {}
+    body = tk.Frame(main, bg=theme.INPUT_BG)
+    body.pack(side="top", fill="both", expand=True)
+    scroll = tk.Scrollbar(body, orient="vertical")
+    scroll.pack(side="right", fill="y")
+    canvas = tk.Canvas(body, bg=theme.INPUT_BG, highlightthickness=0, width=COLS * CELL,
+                       yscrollincrement=CELL, yscrollcommand=scroll.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scroll.configure(command=canvas.yview)
+
+    emoji_font = theme.font(18, emoji=True)
+    state = {"list": [], "group": GROUPS[0][0]}
     tabs = []
 
-    def show_card(key):
-        for f in card_frames.values():
-            f.pack_forget()
-        card_frames[key].pack(fill="both", expand=True)
-        for i, t in enumerate(tabs):
-            t.configure(bg=theme.MEDIUM_BLUE if str(i) == key else theme.DARK_NAVY)
+    def draw(emojis):
+        canvas.delete("all")
+        canvas.create_rectangle(-10, -10, -10, -10, fill="#c8d7f5", outline="", tags="hover")
+        state["list"] = emojis
+        if not emojis:
+            canvas.create_text(COLS * CELL // 2, 50, text="No emoji found",
+                               font=theme.font(11, slant="italic"), fill="gray")
+        for i, em in enumerate(emojis):
+            r, c = divmod(i, COLS)
+            canvas.create_text(c * CELL + CELL // 2, r * CELL + CELL // 2,
+                               text=em, font=emoji_font)
+        rows = max(1, -(-len(emojis) // COLS))
+        canvas.configure(scrollregion=(0, 0, COLS * CELL, rows * CELL))
+        canvas.yview_moveto(0)
 
-    for c, cat in enumerate(CAT_NAMES):
-        tab = tk.Button(tab_row, text=cat.split(" ")[0], font=theme.font(14, emoji=True),
-                         bg=theme.DARK_NAVY, fg="white", relief="flat", bd=0,
-                         activebackground=theme.MEDIUM_BLUE, cursor="hand2",
-                         command=lambda k=str(c): show_card(k))
+    def show_group(g):
+        for (gid, _icon), tab in zip(GROUPS, tabs):
+            tab.configure(bg=theme.MEDIUM_BLUE if gid == g else theme.DARK_NAVY)
+        draw([e[0] for e in data["groups"][g]])
+
+    def pick_group(g):
+        state["group"] = g
+        focused = search.focus_get() is search
+        search_var.set("" if focused else PLACEHOLDER)
+        search.configure(fg=theme.DARK_NAVY if focused else "gray")
+        show_group(g)
+
+    for gid, icon in GROUPS:
+        tab = tk.Button(tab_row, text=icon, font=theme.font(13, emoji=True),
+                        bg=theme.DARK_NAVY, fg="white", relief="flat", bd=0,
+                        activebackground=theme.MEDIUM_BLUE, cursor="hand2",
+                        command=lambda g=gid: pick_group(g))
         tab.pack(side="left", expand=True, fill="x")
         tabs.append(tab)
 
-        grid_frame = tk.Frame(cards, bg=theme.INPUT_BG)
-        card_frames[str(c)] = grid_frame
+    def cell_at(event):
+        c = int(canvas.canvasx(event.x) // CELL)
+        r = int(canvas.canvasy(event.y) // CELL)
+        i = r * COLS + c
+        if 0 <= c < COLS and r >= 0 and i < len(state["list"]):
+            return i
+        return None
 
-        for i, emote in enumerate(CAT_EMOTES[c]):
-            btn = tk.Label(grid_frame, text=emote, font=theme.font(20, emoji=True),
-                            bg=theme.INPUT_BG, width=2, height=1, cursor="hand2")
-            btn.grid(row=i // 5, column=i % 5, padx=1, pady=1)
-            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg="#c8d7f5"))
-            btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=theme.INPUT_BG))
-            btn.bind("<Button-1>", lambda e, em=emote: on_select(em))
+    def on_motion(event):
+        i = cell_at(event)
+        if i is None:
+            canvas.coords("hover", -10, -10, -10, -10)
+        else:
+            r, c = divmod(i, COLS)
+            canvas.coords("hover", c * CELL + 2, r * CELL + 2,
+                          (c + 1) * CELL - 2, (r + 1) * CELL - 2)
 
-    # Search bar
-    search_var = tk.StringVar(value="Search emotes\u2026")
-    search = tk.Entry(main, textvariable=search_var, font=theme.font(11), fg="gray",
-                       relief="flat", highlightthickness=1, highlightbackground=theme.SOFT_BLUE)
-    search.pack(side="bottom", fill="x", padx=1, pady=1)
+    def on_click(event):
+        i = cell_at(event)
+        if i is not None:
+            on_select(state["list"][i])
 
-    search_grid = tk.Frame(cards, bg=theme.INPUT_BG)
-    card_frames["search"] = search_grid
-    all_emotes = [e for cat in CAT_EMOTES for e in cat]
-    for i, emote in enumerate(all_emotes):
-        btn = tk.Label(search_grid, text=emote, font=theme.font(20, emoji=True),
-                        bg=theme.INPUT_BG, width=2, height=1, cursor="hand2")
-        btn.grid(row=i // 5, column=i % 5, padx=1, pady=1)
-        btn.bind("<Enter>", lambda e, b=btn: b.configure(bg="#c8d7f5"))
-        btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=theme.INPUT_BG))
-        btn.bind("<Button-1>", lambda e, em=emote: on_select(em))
+    canvas.bind("<Motion>", on_motion)
+    canvas.bind("<Leave>", lambda e: canvas.coords("hover", -10, -10, -10, -10))
+    canvas.bind("<Button-1>", on_click)
+
+    def scroll_by(event):
+        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def root_wheel(event):
+        # the wheel goes to the focused window, so check the pointer is over the grid
+        try:
+            w = root.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            return
+        while w is not None:
+            if w is canvas:
+                scroll_by(event)
+                return
+            w = w.master
+
+    canvas.bind("<MouseWheel>", scroll_by)
 
     def on_focus_in(_e):
-        if search_var.get() == "Search emotes\u2026":
+        if search_var.get() == PLACEHOLDER:
             search_var.set("")
             search.configure(fg=theme.DARK_NAVY)
 
     def on_focus_out(_e):
         if not search_var.get():
-            search_var.set("Search emotes\u2026")
+            search_var.set(PLACEHOLDER)
             search.configure(fg="gray")
 
     def on_search_change(*_a):
         q = search_var.get().strip()
-        if not q or q == "Search emotes\u2026":
-            show_card("0")
+        if not q or q == PLACEHOLDER:
+            show_group(state["group"])
         else:
-            show_card("search")
+            for tab in tabs:
+                tab.configure(bg=theme.DARK_NAVY)
+            draw(_search(q))
 
     search.bind("<FocusIn>", on_focus_in)
     search.bind("<FocusOut>", on_focus_out)
     search_var.trace_add("write", on_search_change)
 
-    show_card("0")
+    show_group(state["group"])
 
     popup.update_idletasks()
-    pw, ph = 340, 290
+    pw, ph = COLS * CELL + 18, 330
     ax = anchor.winfo_rootx()
     ay = anchor.winfo_rooty()
     aw = anchor.winfo_width()
@@ -162,6 +258,7 @@ def show(anchor, on_select):
     _esc_binding = (root, [
         ("<Escape>", root.bind("<Escape>", on_escape, add="+")),
         ("<FocusIn>", root.bind("<FocusIn>", lambda _e: lift(), add="+")),
+        ("<MouseWheel>", root.bind("<MouseWheel>", root_wheel, add="+")),
     ])
     search.bind("<Escape>", on_escape)
 
