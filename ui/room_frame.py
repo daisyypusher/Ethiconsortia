@@ -310,6 +310,8 @@ class RoomFrame(tk.Toplevel):
 
     def select_sub_room(self, ch_id, ch_name, is_private, dm_partner_id):
         self.clear_pending()
+        if ch_id != self.selected_sub_room_id:
+            emote_picker.close()
         self.selected_sub_room_id = ch_id
         self.selected_sub_room_name = ch_name
         self.selected_is_private = is_private
@@ -614,6 +616,7 @@ class RoomFrame(tk.Toplevel):
             self.txt_message.configure(fg=theme.DARK_NAVY)
         self.txt_message.insert(tk.INSERT, emote)
         self.txt_message.focus_set()
+        emote_picker.lift()
 
     def open_image_chooser(self):
         if self.selected_sub_room_id == -1:
@@ -1418,6 +1421,7 @@ class RoomFrame(tk.Toplevel):
         it, so the placeholder never gets typed into by mistake."""
         self.txt_message.delete(0, tk.END)
         self.clear_pending()
+        emote_picker.close()
         self.cmb_tag.set(TAG_LABELS["none"])
         self._clear_tag_label()
         self._on_tag_change()
@@ -1508,6 +1512,7 @@ class RoomFrame(tk.Toplevel):
                 if is_banned(self.current_user_id, self.room_id):
                     self.txt_message.delete(0, tk.END)
                     self.clear_pending()
+                    emote_picker.close()
                     self.txt_message.configure(fg="gray", state="disabled")
                     self.btn_send.configure(state="disabled")
                     return

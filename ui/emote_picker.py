@@ -47,16 +47,16 @@ CAT_EMOTES = [
 ]
 
 _active_popup = None
+_esc_binding = None     # (window, binding id) of the Esc key binding
 
 
 def show(anchor, on_select):
     """Shows (or, on a second call, closes) the categorized emote picker
     positioned above the given anchor widget."""
-    global _active_popup
+    global _active_popup, _esc_binding
 
     if _active_popup is not None and _active_popup.winfo_exists():
-        _active_popup.destroy()
-        _active_popup = None
+        close()
         return
 
     root = anchor.winfo_toplevel()
@@ -71,6 +71,9 @@ def show(anchor, on_select):
 
     tab_row = tk.Frame(main, bg=theme.DARK_NAVY)
     tab_row.pack(side="top", fill="x")
+    tk.Button(tab_row, text="\u2716", font=theme.font(10, "bold", emoji=True), width=3,
+              bg=theme.RED_ACCENT, fg="white", relief="flat", bd=0, cursor="hand2",
+              command=close).pack(side="right", fill="y")
 
     cards = tk.Frame(main, bg=theme.INPUT_BG)
     cards.pack(side="top", fill="both", expand=True)
@@ -153,21 +156,40 @@ def show(anchor, on_select):
     y = ay - ph - 6
     popup.geometry(f"{pw}x{ph}+{max(0, x)}+{max(0, y)}")
 
-    def close_on_click_outside(event):
-        try:
-            if popup.winfo_exists():
-                wx, wy = popup.winfo_rootx(), popup.winfo_rooty()
-                ww, wh = popup.winfo_width(), popup.winfo_height()
-                if not (wx <= event.x_root <= wx + ww and wy <= event.y_root <= wy + wh):
-                    popup.destroy()
-        except tk.TclError:
-            pass
+    def on_escape(_e=None):
+        close()
 
-    root.bind_all("<Button-1>", close_on_click_outside, add="+")
+    _esc_binding = (root, [
+        ("<Escape>", root.bind("<Escape>", on_escape, add="+")),
+        ("<FocusIn>", root.bind("<FocusIn>", lambda _e: lift(), add="+")),
+    ])
+    search.bind("<Escape>", on_escape)
+
+    return popup
 
 
 def close():
-    global _active_popup
-    if _active_popup is not None and _active_popup.winfo_exists():
-        _active_popup.destroy()
+    global _active_popup, _esc_binding
+    if _esc_binding is not None:
+        win, binds = _esc_binding
+        for seq, bind_id in binds:
+            try:
+                win.unbind(seq, bind_id)
+            except tk.TclError:
+                pass                    # window already gone
+        _esc_binding = None
+    try:
+        if _active_popup is not None and _active_popup.winfo_exists():
+            _active_popup.destroy()
+    except tk.TclError:
+        pass
     _active_popup = None
+
+
+def lift():
+    """Brings the picker back on top (used after each pick, as a safety net)."""
+    try:
+        if _active_popup is not None and _active_popup.winfo_exists():
+            _active_popup.lift()
+    except tk.TclError:
+        pass
