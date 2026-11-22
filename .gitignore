@@ -6,3 +6,5 @@ seed_local.sql
 build/
 dist/
 *.spec
+server/.venv/
+web/node_modules/
