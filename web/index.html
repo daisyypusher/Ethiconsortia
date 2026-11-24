@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Sign in · Ethiconsortia</title>
+<script>
+(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}
+document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")})();
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<button class="theme" id="theme" type="button" aria-label="Switch light or dark mode">◐</button>
+<main class="card">
+  <h1>Sign in</h1>
+  <p class="sub">Ethiconsortia</p>
+  <form id="f" novalidate>
+    <label for="u">Username</label>
+    <input id="u" name="username" autocomplete="username" autocapitalize="none" required>
+    <label for="p">Password</label>
+    <div class="field">
+      <input id="p" class="pw" name="password" type="password" autocomplete="current-password" required>
+      <button class="show" id="show" type="button" aria-label="Show password">Show</button>
+    </div>
+    <button class="btn" id="go" type="submit">Sign in</button>
+    <div class="status" id="st" role="status" aria-live="polite"></div>
+  </form>
+  <p class="foot">New here? <a href="register.html">Create an account</a></p>
+</main>
+<script>
+var $=function(i){return document.getElementById(i)};
+$("theme").onclick=function(){
+  var n=document.documentElement.dataset.theme==="dark"?"light":"dark";
+  document.documentElement.dataset.theme=n;
+  try{localStorage.setItem("theme",n)}catch(e){}
+};
+$("show").onclick=function(){
+  var p=$("p"),h=p.type==="password";
+  p.type=h?"text":"password";
+  this.textContent=h?"Hide":"Show";
+  this.setAttribute("aria-label",h?"Hide password":"Show password");
+};
+$("f").onsubmit=async function(e){
+  e.preventDefault();
+  var st=$("st"),go=$("go");
+  if(!$("u").value.trim()||!$("p").value){
+    st.dataset.state="error";st.textContent="Enter your username and password.";return;
+  }
+  go.disabled=true;st.dataset.state="";st.textContent="Signing in…";
+  try{
+    // ASSUMPTION: replace with your real login route
+    var r=await fetch("/api/auth/login",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username:$("u").value.trim(),password:$("p").value})});
+    if(!r.ok) throw new Error(r.status===401?"Wrong username or password.":"Something went wrong. Try again.");
+    location.href="/app/"; // ASSUMPTION: replace with the lobby page
+  }catch(err){
+    st.dataset.state="error";st.textContent=err.message||"Can't reach the server.";go.disabled=false;
+  }
+};
+</script>
+</body>
+</html>
