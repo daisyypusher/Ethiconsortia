@@ -30,3 +30,6 @@ async def health():
         cur = await conn.execute("select count(*) as users from users")
         row = await cur.fetchone()
     return {"status": "ok", "users": row["users"]}
+
+from fastapi.staticfiles import StaticFiles
+app.mount("/", StaticFiles(directory="web", html=True), name="web")
