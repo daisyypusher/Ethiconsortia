@@ -1,3 +1,6 @@
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -31,5 +34,5 @@ async def health():
         row = await cur.fetchone()
     return {"status": "ok", "users": row["users"]}
 
-from fastapi.staticfiles import StaticFiles
-app.mount("/", StaticFiles(directory="web", html=True), name="web")
+WEB = Path(__file__).resolve().parents[2] / "web"
+app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
