@@ -55,7 +55,7 @@ $("f").onsubmit=async function(e){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({username:$("u").value.trim(),password:$("p").value})});
     if(!r.ok) throw new Error(r.status===401?"Wrong username or password.":"Something went wrong. Try again.");
-    location.href="/app/"; // ASSUMPTION: replace with the lobby page
+    st.dataset.state="";st.textContent="Signed in.";go.disabled=false; // lobby page comes next
   }catch(err){
     st.dataset.state="error";st.textContent=err.message||"Can't reach the server.";go.disabled=false;
   }

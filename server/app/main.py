@@ -1,5 +1,6 @@
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
+from .auth import router as auth_router
 
 from contextlib import asynccontextmanager
 
@@ -35,4 +36,5 @@ async def health():
     return {"status": "ok", "users": row["users"]}
 
 WEB = Path(__file__).resolve().parents[2] / "web"
+app.include_router(auth_router)
 app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
