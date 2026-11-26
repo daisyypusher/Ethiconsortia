@@ -55,11 +55,13 @@ $("f").onsubmit=async function(e){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({username:$("u").value.trim(),password:$("p").value})});
     if(!r.ok) throw new Error(r.status===401?"Wrong username or password.":"Something went wrong. Try again.");
-    st.dataset.state="";st.textContent="Signed in.";go.disabled=false; // lobby page comes next
+    location.href="lobby.html";
   }catch(err){
     st.dataset.state="error";st.textContent=err.message||"Can't reach the server.";go.disabled=false;
   }
 };
+// already signed in? skip this page (login form may flash for a moment)
+fetch("/api/auth/me").then(function(r){if(r.ok)location.replace("lobby.html")}).catch(function(){});
 </script>
 </body>
 </html>

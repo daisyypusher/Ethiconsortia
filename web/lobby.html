@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Ethiconsortia</title>
+<script>
+(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}
+document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")})();
+</script>
+<link rel="stylesheet" href="lobby.css">
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="Rooms">
+    <div id="rooms"></div>
+    <button class="rail-btn add" id="add" type="button" aria-label="Create or join a room">+</button>
+    <div class="rail-foot">
+      <button class="rail-btn" id="theme" type="button" aria-label="Switch light or dark mode">◐</button>
+      <button class="rail-btn" id="out" type="button" aria-label="Sign out">⎋</button>
+    </div>
+  </nav>
+
+  <aside class="subs">
+    <div class="subs-head" id="room-name">Ethiconsortia</div>
+    <p class="empty" id="subs-note">Pick a room to see its sub-rooms.</p>
+    <div class="userbar"><span id="who"></span><small id="role"></small></div>
+  </aside>
+
+  <main class="stage">
+    <h1 id="hello">Welcome</h1>
+    <p id="sub">Pick a room on the left, or tap + to make or join one.</p>
+    <div class="invite" id="invite" hidden></div>
+  </main>
+</div>
+
+<dialog id="dlg">
+  <form id="create" novalidate>
+    <h2>Create a room</h2>
+    <label for="cn">Room name</label>
+    <input id="cn" maxlength="50" autocomplete="off">
+    <label for="cd">Description (optional)</label>
+    <input id="cd" maxlength="200" autocomplete="off">
+    <button class="btn" type="submit">Create room</button>
+  </form>
+  <hr>
+  <form id="join" novalidate>
+    <h2>Join a room</h2>
+    <label for="jc">Invite code</label>
+    <input id="jc" maxlength="20" autocomplete="off" autocapitalize="characters">
+    <button class="btn" type="submit">Join room</button>
+  </form>
+  <div class="status" id="dst" role="status" aria-live="polite"></div>
+  <button class="link" id="close" type="button">Close</button>
+</dialog>
+
+<script>
+var $=function(i){return document.getElementById(i)};
+var rooms=[],current=null;
+
+$("theme").onclick=function(){
+  var n=document.documentElement.dataset.theme==="dark"?"light":"dark";
+  document.documentElement.dataset.theme=n;
+  try{localStorage.setItem("theme",n)}catch(e){}
+};
+
+async function api(path,opts){
+  var r=await fetch(path,opts);
+  if(r.status===401){location.replace("index.html");throw new Error("Signed out.")}
+  if(!r.ok){
+    var d={};try{d=await r.json()}catch(e){}
+    throw new Error(typeof d.detail==="string"?d.detail:"Check what you typed.");
+  }
+  return r.status===204?null:r.json();
+}
+
+// room names are user text: always textContent, never innerHTML
+function drawRail(){
+  var box=$("rooms");box.textContent="";
+  rooms.forEach(function(r){
+    var b=document.createElement("button");
+    b.type="button";b.className="rail-btn room";
+    b.textContent=(Array.from(r.room_name.trim())[0]||"?").toUpperCase();
+    b.title=r.room_name;b.setAttribute("aria-label",r.room_name);
+    b.style.background="hsl("+(r.room_id*47%360)+" 55% 42%)";
+    if(current&&current.room_id===r.room_id)b.setAttribute("aria-current","true");
+    b.onclick=function(){pick(r)};
+    box.appendChild(b);
+  });
+}
+
+function pick(r){
+  current=r;drawRail();
+  $("room-name").textContent=r.room_name;
+  $("subs-note").textContent="Sub-rooms come next.";
+  $("hello").textContent=r.room_name;
+  $("sub").textContent=r.description||"Chat comes next.";
+  var inv=$("invite");
+  if(r.invite_code){inv.hidden=false;inv.textContent="Invite code: "+r.invite_code}
+  else inv.hidden=true;
+}
+
+async function act(path,body){
+  var st=$("dst");st.dataset.state="";st.textContent="Working…";
+  try{
+    var r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!rooms.some(function(x){return x.room_id===r.room_id}))rooms.push(r);
+    $("dlg").close();st.textContent="";
+    $("cn").value="";$("cd").value="";$("jc").value="";
+    pick(r);
+  }catch(err){st.dataset.state="error";st.textContent=err.message}
+}
+$("create").onsubmit=function(e){e.preventDefault();
+  act("/api/rooms",{room_name:$("cn").value,description:$("cd").value})};
+$("join").onsubmit=function(e){e.preventDefault();
+  act("/api/rooms/join",{code:$("jc").value})};
+$("add").onclick=function(){$("dst").textContent="";$("dlg").showModal();$("cn").focus()};
+$("close").onclick=function(){$("dlg").close()};
+
+$("out").onclick=async function(){
+  try{await fetch("/api/auth/logout",{method:"POST"})}catch(e){}
+  location.replace("index.html");
+};
+
+(async function(){
+  try{
+    var me=await api("/api/auth/me");
+    $("who").textContent=me.full_name||me.username;
+    $("role").textContent=me.role.charAt(0).toUpperCase()+me.role.slice(1);
+    $("hello").textContent="Welcome, "+(me.full_name||me.username).split(" ")[0];
+    rooms=await api("/api/rooms");
+    drawRail();
+  }catch(e){}
+})();
+</script>
+</body>
+</html>
