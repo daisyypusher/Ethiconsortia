@@ -24,14 +24,30 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
 
   <aside class="subs">
     <div class="subs-head" id="room-name">Ethiconsortia</div>
+    <div id="subs" role="list"></div>
     <p class="empty" id="subs-note">Pick a room to see its sub-rooms.</p>
     <div class="userbar"><span id="who"></span><small id="role"></small></div>
   </aside>
 
-  <main class="stage">
-    <h1 id="hello">Welcome</h1>
-    <p id="sub">Pick a room on the left, or tap + to make or join one.</p>
-    <div class="invite" id="invite" hidden></div>
+  <main class="main">
+    <div class="stage" id="stage">
+      <h1 id="hello">Welcome</h1>
+      <p id="sub">Pick a room on the left, or tap + to make or join one.</p>
+      <div class="invite" id="invite" hidden></div>
+    </div>
+    <section class="chat" id="chat" hidden>
+      <header class="chat-head" id="chat-title"></header>
+      <div class="feed" id="feed" aria-live="polite"></div>
+      <form class="composer" id="composer" novalidate>
+        <div class="composer-row">
+          <select id="tag" aria-label="Message tag"></select>
+          <input id="label" maxlength="20" placeholder="Label" aria-label="Tag label" hidden>
+          <input id="msg" maxlength="4000" placeholder="Message" autocomplete="off" aria-label="Message">
+          <button class="send" type="submit" aria-label="Send">↑</button>
+        </div>
+        <div class="status" id="cst" role="status" aria-live="polite"></div>
+      </form>
+    </section>
   </main>
 </div>
 
@@ -55,9 +71,34 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
   <button class="link" id="close" type="button">Close</button>
 </dialog>
 
+<dialog id="edlg">
+  <form id="edit" novalidate>
+    <h2>Edit message</h2>
+    <p class="note">Everyone in the room can see the edit history.</p>
+    <label for="etext">Text</label>
+    <input id="etext" maxlength="4000" autocomplete="off">
+    <label for="etag">Tag</label>
+    <select id="etag"></select>
+    <input id="elabel" maxlength="20" placeholder="Label" aria-label="Tag label" hidden>
+    <button class="btn" type="submit">Save</button>
+  </form>
+  <div class="status" id="est" role="status" aria-live="polite"></div>
+  <button class="link" id="ecancel" type="button">Cancel</button>
+</dialog>
+
+<dialog id="hdlg">
+  <h2>Edit history</h2>
+  <div id="hlist"></div>
+  <button class="link" id="hclose" type="button">Close</button>
+</dialog>
+
 <script>
 var $=function(i){return document.getElementById(i)};
 var rooms=[],current=null;
+var subs=[],sub=null,lastId=0,since=null,seen={},timer=null,busy=false,editing=null;
+var JH={"Content-Type":"application/json"};
+var TAGS={none:"No tag",announcement:"Announcement",question:"Question",
+  emergency:"Emergency",wrong_sent:"Wrong sent",other:"Other"};
 
 $("theme").onclick=function(){
   var n=document.documentElement.dataset.theme==="dark"?"light":"dark";
@@ -90,16 +131,199 @@ function drawRail(){
   });
 }
 
-function pick(r){
-  current=r;drawRail();
+function el(tag,cls,text){
+  var n=document.createElement(tag);
+  if(cls)n.className=cls;
+  if(text!==undefined)n.textContent=text;
+  return n;
+}
+function fmt(iso){
+  var d=new Date(iso),
+      t=d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+  return d.toDateString()===new Date().toDateString()
+    ? t : d.toLocaleDateString([],{month:"short",day:"numeric"})+", "+t;
+}
+function fillTags(sel){
+  Object.keys(TAGS).forEach(function(k){
+    var o=document.createElement("option");o.value=k;o.textContent=TAGS[k];sel.appendChild(o);
+  });
+}
+fillTags($("tag"));fillTags($("etag"));
+$("tag").onchange=function(){$("label").hidden=this.value!=="other"};
+$("etag").onchange=function(){$("elabel").hidden=this.value!=="other"};
+
+async function pick(r){
+  current=r;drawRail();closeChat();
   $("room-name").textContent=r.room_name;
-  $("subs-note").textContent="Sub-rooms come next.";
   $("hello").textContent=r.room_name;
-  $("sub").textContent=r.description||"Chat comes next.";
+  $("sub").textContent=r.description||"Pick a sub-room to start.";
   var inv=$("invite");
   if(r.invite_code){inv.hidden=false;inv.textContent="Invite code: "+r.invite_code}
   else inv.hidden=true;
+  $("subs").textContent="";$("subs-note").textContent="Loading…";
+  try{
+    var list=await api("/api/rooms/"+r.room_id+"/sub-rooms");
+    if(current!==r)return;
+    subs=list;
+    $("subs-note").textContent=subs.length?"":"No sub-rooms.";
+    drawSubs();
+    var first=subs.find(function(s){return s.can_read});
+    if(first)openSub(first);
+  }catch(e){if(current===r)$("subs-note").textContent=e.message}
 }
+
+function drawSubs(){
+  var box=$("subs");box.textContent="";
+  subs.forEach(function(s){
+    var b=el("button","sub-row",(s.kind==="announcement"?"📢 ":"# ")+s.name);
+    b.type="button";b.setAttribute("role","listitem");b.disabled=!s.can_read;
+    if(sub&&sub.sub_room_id===s.sub_room_id)b.setAttribute("aria-current","true");
+    b.onclick=function(){openSub(s)};
+    box.appendChild(b);
+  });
+}
+
+function stopPoll(){if(timer){clearInterval(timer);timer=null}}
+function closeChat(){
+  stopPoll();sub=null;
+  $("chat").hidden=true;$("stage").hidden=false;
+}
+function setComposer(ok){
+  $("msg").disabled=!ok;$("tag").disabled=!ok;$("label").disabled=!ok;
+  $("msg").placeholder=ok?"Message":
+    (sub&&sub.kind==="announcement"?"Only the host can post here.":"You can't post here.");
+}
+function nearBottom(){var f=$("feed");return f.scrollHeight-f.scrollTop-f.clientHeight<80}
+function scrollDown(){var f=$("feed");f.scrollTop=f.scrollHeight}
+
+async function openSub(s){
+  stopPoll();sub=s;lastId=0;since=null;seen={};busy=false;
+  drawSubs();
+  $("stage").hidden=true;$("chat").hidden=false;
+  $("chat-title").textContent=(s.kind==="announcement"?"📢 ":"# ")+s.name;
+  $("feed").textContent="";$("cst").textContent="";
+  setComposer(s.can_send);
+  await poll(true);
+  if(sub===s)timer=setInterval(function(){if(!document.hidden)poll()},2000);
+}
+document.addEventListener("visibilitychange",function(){if(!document.hidden)poll()});
+
+async function poll(first){
+  if(!sub||busy)return;
+  busy=true;var mine=sub;
+  try{
+    var q=first?"":"?after="+lastId+"&since="+encodeURIComponent(since);
+    var d=await api("/api/sub-rooms/"+mine.sub_room_id+"/messages"+q);
+    if(sub!==mine)return;
+    since=d.now;setComposer(d.can_send);
+    var stick=first||nearBottom();
+    d.messages.forEach(upsert);
+    if(d.messages.length&&stick)scrollDown();
+  }catch(e){/* next tick retries */}
+  finally{busy=false}
+}
+
+function upsert(m){
+  if(m.message_id>lastId)lastId=m.message_id;
+  var node=build(m),old=seen[m.message_id];
+  if(old)old.replaceWith(node);else $("feed").appendChild(node);
+  seen[m.message_id]=node;
+}
+
+function build(m){
+  var row=el("div","msg");
+  var av=el("div","avatar",(Array.from(m.name.trim())[0]||"?").toUpperCase());
+  av.style.background="hsl("+(m.sender_id*47%360)+" 55% 42%)";
+  var body=el("div","msg-body"),head=el("div","msg-head");
+  head.appendChild(el("span","msg-name",m.name));
+  if(m.role!=="student")head.appendChild(el("span","badge",m.role==="admin"?"Admin":"Professor"));
+  var t=el("time","msg-time",fmt(m.created_at));t.dateTime=m.created_at;head.appendChild(t);
+  if(m.tag!=="none"){
+    var tg=el("span","tag",m.tag==="other"?m.tag_label:TAGS[m.tag]);
+    tg.dataset.tag=m.tag;head.appendChild(tg);
+  }
+  body.appendChild(head);
+  body.appendChild(el("div","msg-text",m.content));
+  var meta=el("div","msg-meta");
+  if(m.is_edited){
+    var h=el("button",null,"edited");h.type="button";
+    h.onclick=function(){showHistory(m)};meta.appendChild(h);
+  }
+  if(m.mine&&sub&&sub.can_send){
+    var e=el("button",null,"Edit");e.type="button";
+    e.onclick=function(){openEdit(m)};meta.appendChild(e);
+  }
+  if(meta.children.length)body.appendChild(meta);
+  row.appendChild(av);row.appendChild(body);
+  return row;
+}
+
+$("composer").onsubmit=async function(e){
+  e.preventDefault();
+  var text=$("msg").value.trim(),tag=$("tag").value,st=$("cst");
+  if(!text||!sub)return;
+  st.dataset.state="";st.textContent="";
+  var label=$("label").value.trim();
+  if(tag==="other"&&!label){st.dataset.state="error";st.textContent='Add a label for the "Other" tag.';return}
+  var mine=sub;
+  try{
+    var m=await api("/api/sub-rooms/"+mine.sub_room_id+"/messages",{method:"POST",headers:JH,
+      body:JSON.stringify({content:text,tag:tag,tag_label:tag==="other"?label:null})});
+    if(sub!==mine)return;
+    $("msg").value="";$("tag").value="none";$("label").value="";$("label").hidden=true;
+    upsert(m);scrollDown();
+  }catch(err){st.dataset.state="error";st.textContent=err.message}
+};
+
+function openEdit(m){
+  editing=m;
+  $("etext").value=m.content;$("etag").value=m.tag;
+  $("elabel").value=m.tag_label||"";$("elabel").hidden=m.tag!=="other";
+  $("est").textContent="";$("edlg").showModal();$("etext").focus();
+}
+$("ecancel").onclick=function(){$("edlg").close()};
+$("edit").onsubmit=async function(e){
+  e.preventDefault();
+  var m=editing,st=$("est"),text=$("etext").value.trim(),tag=$("etag").value,
+      label=tag==="other"?$("elabel").value.trim():null;
+  st.dataset.state="";
+  if(!text){st.dataset.state="error";st.textContent="Message can't be empty.";return}
+  st.textContent="Saving…";
+  try{
+    if(text!==m.content){
+      m=await api("/api/messages/"+m.message_id,{method:"PATCH",headers:JH,
+        body:JSON.stringify({content:text})});
+      upsert(m);editing=m;
+    }
+    if(tag!==m.tag||(label||null)!==(m.tag_label||null)){
+      m=await api("/api/messages/"+m.message_id+"/tag",{method:"PATCH",headers:JH,
+        body:JSON.stringify({tag:tag,tag_label:label})});
+      upsert(m);editing=m;
+    }
+    $("edlg").close();st.textContent="";
+  }catch(err){st.dataset.state="error";st.textContent=err.message}
+};
+
+async function showHistory(m){
+  var box=$("hlist");box.textContent="Loading…";$("hdlg").showModal();
+  try{
+    var ev=await api("/api/messages/"+m.message_id+"/history");
+    box.textContent="";
+    if(!ev.length){box.textContent="No edits recorded.";return}
+    ev.forEach(function(x){
+      var d=el("div","hist");
+      d.appendChild(el("div","msg-time",fmt(x.at)));
+      if(x.kind==="tag"){
+        d.appendChild(el("div",null,"Tag: "+x.old+" → "+x.new));
+      }else{
+        d.appendChild(el("div",null,"Before: "+x.old));
+        d.appendChild(el("div",null,"After: "+x.new));
+      }
+      box.appendChild(d);
+    });
+  }catch(err){box.textContent=err.message}
+}
+$("hclose").onclick=function(){$("hdlg").close()};
 
 async function act(path,body){
   var st=$("dst");st.dataset.state="";st.textContent="Working…";

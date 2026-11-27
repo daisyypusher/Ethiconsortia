@@ -2,6 +2,7 @@ from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from .auth import router as auth_router
 from .rooms import router as rooms_router
+from .chat import router as chat_router
 
 from contextlib import asynccontextmanager
 
@@ -39,4 +40,5 @@ async def health():
 WEB = Path(__file__).resolve().parents[2] / "web"
 app.include_router(auth_router)
 app.include_router(rooms_router)
+app.include_router(chat_router)
 app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
