@@ -17,6 +17,7 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
     <div id="rooms"></div>
     <button class="rail-btn add" id="add" type="button" aria-label="Create or join a room">+</button>
     <div class="rail-foot">
+      <button class="rail-btn" id="inbox" type="button" aria-label="Private messages" hidden>✉<span class="badge-n" id="inbox-n" hidden></span></button>
       <button class="rail-btn" id="theme" type="button" aria-label="Switch light or dark mode">◐</button>
       <button class="rail-btn" id="out" type="button" aria-label="Sign out">⎋</button>
     </div>
@@ -25,6 +26,11 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
   <aside class="subs">
     <div class="subs-head" id="room-name">Ethiconsortia</div>
     <div id="subs" role="list"></div>
+    <div class="sec" id="dms-head" hidden>
+      <span>Private messages</span>
+      <button class="mini" id="newdm" type="button" aria-label="New private message">+</button>
+    </div>
+    <div id="dms" role="list"></div>
     <p class="empty" id="subs-note">Pick a room to see its sub-rooms.</p>
     <div class="userbar"><span id="who"></span><small id="role"></small></div>
   </aside>
@@ -77,13 +83,28 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
     <p class="note">Everyone in the room can see the edit history.</p>
     <label for="etext">Text</label>
     <input id="etext" maxlength="4000" autocomplete="off">
-    <label for="etag">Tag</label>
-    <select id="etag"></select>
-    <input id="elabel" maxlength="20" placeholder="Label" aria-label="Tag label" hidden>
+    <div id="etagbox">
+      <label for="etag">Tag</label>
+      <select id="etag"></select>
+      <input id="elabel" maxlength="20" placeholder="Label" aria-label="Tag label" hidden>
+    </div>
     <button class="btn" type="submit">Save</button>
   </form>
   <div class="status" id="est" role="status" aria-live="polite"></div>
   <button class="link" id="ecancel" type="button">Cancel</button>
+</dialog>
+
+<dialog id="ndlg">
+  <h2>New private message</h2>
+  <p class="note">Only you, them, and admins can see this conversation.</p>
+  <div id="mlist"></div>
+  <button class="link" id="nclose" type="button">Close</button>
+</dialog>
+
+<dialog id="idlg">
+  <h2>New private messages</h2>
+  <div id="ilist"></div>
+  <button class="link" id="iclose" type="button">Close</button>
 </dialog>
 
 <dialog id="hdlg">
@@ -96,6 +117,7 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
 var $=function(i){return document.getElementById(i)};
 var rooms=[],current=null;
 var subs=[],sub=null,lastId=0,since=null,seen={},timer=null,busy=false,editing=null;
+var dms=[],me=null,unreadAll=[],unreadByRoom={},unreadByThread={},unreadSig="";
 var JH={"Content-Type":"application/json"};
 var TAGS={none:"No tag",announcement:"Announcement",question:"Question",
   emergency:"Emergency",wrong_sent:"Wrong sent",other:"Other"};
@@ -120,12 +142,14 @@ async function api(path,opts){
 function drawRail(){
   var box=$("rooms");box.textContent="";
   rooms.forEach(function(r){
-    var b=document.createElement("button");
+    var b=document.createElement("button"),n=unreadByRoom[r.room_id]||0;
     b.type="button";b.className="rail-btn room";
     b.textContent=(Array.from(r.room_name.trim())[0]||"?").toUpperCase();
-    b.title=r.room_name;b.setAttribute("aria-label",r.room_name);
+    b.title=r.room_name;
+    b.setAttribute("aria-label",r.room_name+(n?" ("+n+" unread private)":""));
     b.style.background="hsl("+(r.room_id*47%360)+" 55% 42%)";
     if(current&&current.room_id===r.room_id)b.setAttribute("aria-current","true");
+    if(n)b.appendChild(el("span","dot"));
     b.onclick=function(){pick(r)};
     box.appendChild(b);
   });
@@ -143,6 +167,13 @@ function fmt(iso){
   return d.toDateString()===new Date().toDateString()
     ? t : d.toLocaleDateString([],{month:"short",day:"numeric"})+", "+t;
 }
+// a chat is either a sub-room (has sub_room_id) or a private thread (has thread_id)
+function keyOf(c){return c.thread_id?"d"+c.thread_id:"s"+c.sub_room_id}
+function msgsUrl(c){
+  return c.thread_id?"/api/dms/"+c.thread_id+"/messages":"/api/sub-rooms/"+c.sub_room_id+"/messages";
+}
+function editUrl(c){return c.thread_id?"/api/dm-messages/":"/api/messages/"}
+
 function fillTags(sel){
   Object.keys(TAGS).forEach(function(k){
     var o=document.createElement("option");o.value=k;o.textContent=TAGS[k];sel.appendChild(o);
@@ -153,23 +184,36 @@ $("tag").onchange=function(){$("label").hidden=this.value!=="other"};
 $("etag").onchange=function(){$("elabel").hidden=this.value!=="other"};
 
 async function pick(r){
-  current=r;drawRail();closeChat();
+  current=r;dms=[];drawRail();closeChat();
   $("room-name").textContent=r.room_name;
   $("hello").textContent=r.room_name;
   $("sub").textContent=r.description||"Pick a sub-room to start.";
   var inv=$("invite");
   if(r.invite_code){inv.hidden=false;inv.textContent="Invite code: "+r.invite_code}
   else inv.hidden=true;
-  $("subs").textContent="";$("subs-note").textContent="Loading…";
+  $("subs").textContent="";$("dms").textContent="";$("dms-head").hidden=true;
+  $("subs-note").textContent="Loading…";
   try{
     var list=await api("/api/rooms/"+r.room_id+"/sub-rooms");
     if(current!==r)return;
     subs=list;
     $("subs-note").textContent=subs.length?"":"No sub-rooms.";
     drawSubs();
+    $("dms-head").hidden=false;
+    await loadDms();
+    if(current!==r)return;
     var first=subs.find(function(s){return s.can_read});
-    if(first)openSub(first);
+    if(first)openChat(first);
   }catch(e){if(current===r)$("subs-note").textContent=e.message}
+}
+
+async function loadDms(){
+  var r=current;if(!r)return;
+  try{
+    var l=await api("/api/rooms/"+r.room_id+"/dms");
+    if(current!==r)return;
+    dms=l;drawDms();
+  }catch(e){}
 }
 
 function drawSubs(){
@@ -177,8 +221,19 @@ function drawSubs(){
   subs.forEach(function(s){
     var b=el("button","sub-row",(s.kind==="announcement"?"📢 ":"# ")+s.name);
     b.type="button";b.setAttribute("role","listitem");b.disabled=!s.can_read;
-    if(sub&&sub.sub_room_id===s.sub_room_id)b.setAttribute("aria-current","true");
-    b.onclick=function(){openSub(s)};
+    if(sub&&keyOf(sub)===keyOf(s))b.setAttribute("aria-current","true");
+    b.onclick=function(){openChat(s)};
+    box.appendChild(b);
+  });
+}
+function drawDms(){
+  var box=$("dms");box.textContent="";
+  dms.forEach(function(d){
+    var b=el("button","sub-row","🔒 "+d.name);
+    b.type="button";b.setAttribute("role","listitem");
+    if(sub&&keyOf(sub)===keyOf(d))b.setAttribute("aria-current","true");
+    if(unreadByThread[d.thread_id])b.appendChild(el("span","dot-inline"));
+    b.onclick=function(){openChat(d)};
     box.appendChild(b);
   });
 }
@@ -191,20 +246,22 @@ function closeChat(){
 function setComposer(ok){
   $("msg").disabled=!ok;$("tag").disabled=!ok;$("label").disabled=!ok;
   $("msg").placeholder=ok?"Message":
-    (sub&&sub.kind==="announcement"?"Only the host can post here.":"You can't post here.");
+    (sub&&sub.thread_id?"You can't send private messages here.":
+     (sub&&sub.kind==="announcement"?"Only the host can post here.":"You can't post here."));
 }
 function nearBottom(){var f=$("feed");return f.scrollHeight-f.scrollTop-f.clientHeight<80}
 function scrollDown(){var f=$("feed");f.scrollTop=f.scrollHeight}
 
-async function openSub(s){
-  stopPoll();sub=s;lastId=0;since=null;seen={};busy=false;
-  drawSubs();
+async function openChat(c){
+  stopPoll();sub=c;lastId=0;since=null;seen={};busy=false;
+  drawSubs();drawDms();
   $("stage").hidden=true;$("chat").hidden=false;
-  $("chat-title").textContent=(s.kind==="announcement"?"📢 ":"# ")+s.name;
+  $("chat-title").textContent=c.thread_id?"🔒 "+c.name:
+    (c.kind==="announcement"?"📢 ":"# ")+c.name;
   $("feed").textContent="";$("cst").textContent="";
-  setComposer(s.can_send);
+  setComposer(c.thread_id?true:c.can_send);
   await poll(true);
-  if(sub===s)timer=setInterval(function(){if(!document.hidden)poll()},2000);
+  if(sub===c)timer=setInterval(function(){if(!document.hidden)poll()},2000);
 }
 document.addEventListener("visibilitychange",function(){if(!document.hidden)poll()});
 
@@ -213,7 +270,7 @@ async function poll(first){
   busy=true;var mine=sub;
   try{
     var q=first?"":"?after="+lastId+"&since="+encodeURIComponent(since);
-    var d=await api("/api/sub-rooms/"+mine.sub_room_id+"/messages"+q);
+    var d=await api(msgsUrl(mine)+q);
     if(sub!==mine)return;
     since=d.now;setComposer(d.can_send);
     var stick=first||nearBottom();
@@ -230,31 +287,34 @@ function upsert(m){
   seen[m.message_id]=node;
 }
 
+// yours: right, blue, no name or avatar. Others: left, gray, avatar and name.
 function build(m){
-  var row=el("div","msg");
-  var av=el("div","avatar",(Array.from(m.name.trim())[0]||"?").toUpperCase());
-  av.style.background="hsl("+(m.sender_id*47%360)+" 55% 42%)";
-  var body=el("div","msg-body"),head=el("div","msg-head");
-  head.appendChild(el("span","msg-name",m.name));
-  if(m.role!=="student")head.appendChild(el("span","badge",m.role==="admin"?"Admin":"Professor"));
-  var t=el("time","msg-time",fmt(m.created_at));t.dateTime=m.created_at;head.appendChild(t);
+  var row=el("div","msg"+(m.mine?" mine":"")),col=el("div","msg-col");
+  if(!m.mine){
+    var av=el("div","avatar",(Array.from(m.name.trim())[0]||"?").toUpperCase());
+    av.style.background="hsl("+(m.sender_id*47%360)+" 55% 42%)";
+    row.appendChild(av);
+    var head=el("div","msg-head");
+    head.appendChild(el("span","msg-name",m.name));
+    if(m.role!=="student")head.appendChild(el("span","badge",m.role==="admin"?"Admin":"Professor"));
+    col.appendChild(head);
+  }
   if(m.tag!=="none"){
     var tg=el("span","tag",m.tag==="other"?m.tag_label:TAGS[m.tag]);
-    tg.dataset.tag=m.tag;head.appendChild(tg);
+    tg.dataset.tag=m.tag;col.appendChild(tg);
   }
-  body.appendChild(head);
-  body.appendChild(el("div","msg-text",m.content));
+  col.appendChild(el("div","bubble",m.content));
   var meta=el("div","msg-meta");
+  var t=el("time","msg-time",fmt(m.created_at));t.dateTime=m.created_at;meta.appendChild(t);
   if(m.is_edited){
     var h=el("button",null,"edited");h.type="button";
     h.onclick=function(){showHistory(m)};meta.appendChild(h);
   }
-  if(m.mine&&sub&&sub.can_send){
+  if(m.mine&&sub&&(sub.thread_id||sub.can_send)){
     var e=el("button",null,"Edit");e.type="button";
     e.onclick=function(){openEdit(m)};meta.appendChild(e);
   }
-  if(meta.children.length)body.appendChild(meta);
-  row.appendChild(av);row.appendChild(body);
+  col.appendChild(meta);row.appendChild(col);
   return row;
 }
 
@@ -267,7 +327,7 @@ $("composer").onsubmit=async function(e){
   if(tag==="other"&&!label){st.dataset.state="error";st.textContent='Add a label for the "Other" tag.';return}
   var mine=sub;
   try{
-    var m=await api("/api/sub-rooms/"+mine.sub_room_id+"/messages",{method:"POST",headers:JH,
+    var m=await api(msgsUrl(mine),{method:"POST",headers:JH,
       body:JSON.stringify({content:text,tag:tag,tag_label:tag==="other"?label:null})});
     if(sub!==mine)return;
     $("msg").value="";$("tag").value="none";$("label").value="";$("label").hidden=true;
@@ -279,24 +339,24 @@ function openEdit(m){
   editing=m;
   $("etext").value=m.content;$("etag").value=m.tag;
   $("elabel").value=m.tag_label||"";$("elabel").hidden=m.tag!=="other";
+  $("etagbox").hidden=!!sub.thread_id;           // no retag in private messages yet
   $("est").textContent="";$("edlg").showModal();$("etext").focus();
 }
 $("ecancel").onclick=function(){$("edlg").close()};
 $("edit").onsubmit=async function(e){
   e.preventDefault();
   var m=editing,st=$("est"),text=$("etext").value.trim(),tag=$("etag").value,
-      label=tag==="other"?$("elabel").value.trim():null;
+      label=tag==="other"?$("elabel").value.trim():null,base=editUrl(sub);
   st.dataset.state="";
   if(!text){st.dataset.state="error";st.textContent="Message can't be empty.";return}
   st.textContent="Saving…";
   try{
     if(text!==m.content){
-      m=await api("/api/messages/"+m.message_id,{method:"PATCH",headers:JH,
-        body:JSON.stringify({content:text})});
+      m=await api(base+m.message_id,{method:"PATCH",headers:JH,body:JSON.stringify({content:text})});
       upsert(m);editing=m;
     }
-    if(tag!==m.tag||(label||null)!==(m.tag_label||null)){
-      m=await api("/api/messages/"+m.message_id+"/tag",{method:"PATCH",headers:JH,
+    if(!sub.thread_id&&(tag!==m.tag||(label||null)!==(m.tag_label||null))){
+      m=await api(base+m.message_id+"/tag",{method:"PATCH",headers:JH,
         body:JSON.stringify({tag:tag,tag_label:label})});
       upsert(m);editing=m;
     }
@@ -307,7 +367,7 @@ $("edit").onsubmit=async function(e){
 async function showHistory(m){
   var box=$("hlist");box.textContent="Loading…";$("hdlg").showModal();
   try{
-    var ev=await api("/api/messages/"+m.message_id+"/history");
+    var ev=await api(editUrl(sub)+m.message_id+"/history");
     box.textContent="";
     if(!ev.length){box.textContent="No edits recorded.";return}
     ev.forEach(function(x){
@@ -324,6 +384,79 @@ async function showHistory(m){
   }catch(err){box.textContent=err.message}
 }
 $("hclose").onclick=function(){$("hdlg").close()};
+
+/* ---------- private messages ---------- */
+$("newdm").onclick=async function(){
+  var box=$("mlist");box.textContent="Loading…";$("ndlg").showModal();
+  try{
+    var people=await api("/api/rooms/"+current.room_id+"/members");
+    box.textContent="";
+    if(!people.length)box.textContent="No one else is in this room yet.";
+    people.forEach(function(p){
+      var b=el("button","pick-row");b.type="button";
+      b.appendChild(el("span",null,p.name));
+      b.appendChild(el("span","msg-time",
+        p.role==="admin"?"Admin":p.role==="professor"?"Professor":"Student"));
+      b.onclick=async function(){
+        try{
+          var t=await api("/api/rooms/"+current.room_id+"/dms",{method:"POST",headers:JH,
+            body:JSON.stringify({user_id:p.user_id})});
+          $("ndlg").close();await loadDms();
+          var d=dms.find(function(x){return x.thread_id===t.thread_id});
+          if(d)openChat(d);
+        }catch(err){box.textContent=err.message}
+      };
+      box.appendChild(b);
+    });
+  }catch(err){box.textContent=err.message}
+};
+$("nclose").onclick=function(){$("ndlg").close()};
+$("iclose").onclick=function(){$("idlg").close()};
+
+async function openThread(roomId,threadId){
+  var r=rooms.find(function(x){return x.room_id===roomId});
+  if(!r)return;
+  if(!current||current.room_id!==roomId)await pick(r);
+  var d=dms.find(function(x){return x.thread_id===threadId});
+  if(!d){await loadDms();d=dms.find(function(x){return x.thread_id===threadId})}
+  if(d)openChat(d);
+}
+
+// professor inbox: student name + room name + count
+$("inbox").onclick=function(){
+  var box=$("ilist");box.textContent="";
+  if(!unreadAll.length)box.textContent="No new private messages.";
+  unreadAll.forEach(function(u){
+    var b=el("button","pick-row");b.type="button";
+    b.appendChild(el("span",null,u.from_name+" · "+u.room_name));
+    b.appendChild(el("span","msg-time",u.n+" new"));
+    b.onclick=function(){$("idlg").close();openThread(u.room_id,u.thread_id)};
+    box.appendChild(b);
+  });
+  $("idlg").showModal();
+};
+function drawInbox(){
+  var total=unreadAll.reduce(function(a,u){return a+u.n},0),n=$("inbox-n");
+  n.hidden=!total;n.textContent=total;
+}
+
+async function pollUnread(){
+  if(document.hidden||!me)return;
+  try{
+    var list=await api("/api/dms/unread"),missing=false;
+    unreadAll=list;unreadByRoom={};unreadByThread={};
+    list.forEach(function(u){
+      if(sub&&sub.thread_id===u.thread_id)return;     // the open chat marks itself read
+      unreadByRoom[u.room_id]=(unreadByRoom[u.room_id]||0)+u.n;
+      unreadByThread[u.thread_id]=u.n;
+      if(current&&current.room_id===u.room_id&&
+         !dms.some(function(d){return d.thread_id===u.thread_id}))missing=true;
+    });
+    var sig=JSON.stringify([unreadByRoom,unreadByThread,unreadAll.length]);
+    if(sig!==unreadSig){unreadSig=sig;drawRail();drawDms();drawInbox()}   // redraw only on change
+    if(missing)loadDms();
+  }catch(e){}
+}
 
 async function act(path,body){
   var st=$("dst");st.dataset.state="";st.textContent="Working…";
@@ -349,12 +482,15 @@ $("out").onclick=async function(){
 
 (async function(){
   try{
-    var me=await api("/api/auth/me");
+    me=await api("/api/auth/me");
+    if(me.role==="professor")$("inbox").hidden=false;
     $("who").textContent=me.full_name||me.username;
     $("role").textContent=me.role.charAt(0).toUpperCase()+me.role.slice(1);
     $("hello").textContent="Welcome, "+(me.full_name||me.username).split(" ")[0];
     rooms=await api("/api/rooms");
     drawRail();
+    pollUnread();
+    setInterval(pollUnread,4000);
   }catch(e){}
 })();
 </script>

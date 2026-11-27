@@ -171,3 +171,45 @@ alter table room_warnings      enable row level security;
 insert into verification_codes (role, code) values
   ('professor', 'CHANGE-ME-PROF'),
   ('admin',     'CHANGE-ME-ADMIN');
+
+create table dm_threads (
+  thread_id  bigint generated always as identity primary key,
+  room_id    bigint not null references rooms(room_id) on delete cascade,
+  user_a     bigint not null references users(user_id) on delete cascade,  -- lower id
+  user_b     bigint not null references users(user_id) on delete cascade,  -- higher id
+  created_by bigint not null references users(user_id) on delete cascade,
+  created_at timestamptz not null default now(),
+  check (user_a < user_b),
+  unique (room_id, user_a, user_b)
+);
+create index dm_threads_a on dm_threads (user_a);
+create index dm_threads_b on dm_threads (user_b);
+
+create table dm_messages (
+  message_id bigint generated always as identity primary key,
+  thread_id  bigint not null references dm_threads(thread_id) on delete cascade,
+  sender_id  bigint not null references users(user_id),
+  content    text not null,
+  tag        text not null default 'none'
+             check (tag in ('none','announcement','question','emergency','wrong_sent','other')),
+  tag_label  text,
+  is_edited  boolean not null default false,
+  edited_at  timestamptz,
+  read_at    timestamptz,                -- set when the other person opens it
+  created_at timestamptz not null default now()
+);
+create index dm_messages_thread on dm_messages (thread_id, message_id);
+create index dm_messages_unread on dm_messages (thread_id) where read_at is null;
+
+create table dm_message_edits (
+  edit_id     bigint generated always as identity primary key,
+  message_id  bigint not null references dm_messages(message_id) on delete cascade,
+  old_content text not null,
+  new_content text not null,
+  edited_at   timestamptz not null default now()
+);
+create index dm_message_edits_msg on dm_message_edits (message_id);
+
+alter table dm_threads       enable row level security;
+alter table dm_messages      enable row level security;
+alter table dm_message_edits enable row level security;
