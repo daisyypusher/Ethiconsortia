@@ -339,7 +339,6 @@ function openEdit(m){
   editing=m;
   $("etext").value=m.content;$("etag").value=m.tag;
   $("elabel").value=m.tag_label||"";$("elabel").hidden=m.tag!=="other";
-  $("etagbox").hidden=!!sub.thread_id;           // no retag in private messages yet
   $("est").textContent="";$("edlg").showModal();$("etext").focus();
 }
 $("ecancel").onclick=function(){$("edlg").close()};
@@ -355,7 +354,7 @@ $("edit").onsubmit=async function(e){
       m=await api(base+m.message_id,{method:"PATCH",headers:JH,body:JSON.stringify({content:text})});
       upsert(m);editing=m;
     }
-    if(!sub.thread_id&&(tag!==m.tag||(label||null)!==(m.tag_label||null))){
+    if(tag!==m.tag||(label||null)!==(m.tag_label||null)){
       m=await api(base+m.message_id+"/tag",{method:"PATCH",headers:JH,
         body:JSON.stringify({tag:tag,tag_label:label})});
       upsert(m);editing=m;

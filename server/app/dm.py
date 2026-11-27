@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .auth import current_user
-from .chat import EditIn, SendIn, _member, _msg, _tag
+from .chat import EditIn, SendIn, TagIn, _member, _msg, _tag, _tag_text
 from .db import pool
 
 router = APIRouter(prefix="/api", tags=["dm"])
@@ -201,6 +201,33 @@ async def edit_dm(message_id: int, body: EditIn, user=Depends(current_user)):
             row = await _fetch_one(conn, message_id)
     return _msg(row, user["user_id"])
 
+@router.patch("/dm-messages/{message_id}/tag")
+async def retag_dm(message_id: int, body: TagIn, user=Depends(current_user)):
+    tag, label = _tag(body.tag, body.tag_label)
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cur = await conn.execute(
+                "select thread_id, sender_id, tag, tag_label from dm_messages "
+                "where message_id = %s for update", (message_id,))
+            m = await cur.fetchone()
+            if not m:
+                raise HTTPException(404, "No such message.")
+            if m["sender_id"] != user["user_id"]:
+                raise HTTPException(403, "You can only change your own messages.")
+            a = await _thread(conn, m["thread_id"], user["user_id"])
+            if not a["can_send"]:
+                raise HTTPException(403, "You can't change messages here.")
+            if (tag, label) != (m["tag"], m["tag_label"]):
+                await conn.execute(
+                    "insert into dm_message_tag_edits "
+                    "(message_id, old_tag, old_label, new_tag, new_label) "
+                    "values (%s, %s, %s, %s, %s)",
+                    (message_id, m["tag"], m["tag_label"], tag, label))
+                await conn.execute(
+                    "update dm_messages set tag = %s, tag_label = %s, is_edited = true, "
+                    "edited_at = now() where message_id = %s", (tag, label, message_id))
+            row = await _fetch_one(conn, message_id)
+    return _msg(row, user["user_id"])
 
 @router.get("/dm-messages/{message_id}/history")
 async def dm_history(message_id: int, user=Depends(current_user)):
@@ -213,7 +240,16 @@ async def dm_history(message_id: int, user=Depends(current_user)):
         await _thread(conn, m["thread_id"], user["user_id"])
         cur = await conn.execute(
             "select old_content, new_content, edited_at from dm_message_edits "
-            "where message_id = %s order by edited_at, edit_id", (message_id,))
-        rows = await cur.fetchall()
-    return [{"kind": "text", "at": r["edited_at"],
-             "old": r["old_content"], "new": r["new_content"]} for r in rows]
+            "where message_id = %s", (message_id,))
+        texts = await cur.fetchall()
+        cur = await conn.execute(
+            "select old_tag, old_label, new_tag, new_label, edited_at "
+            "from dm_message_tag_edits where message_id = %s", (message_id,))
+        tags = await cur.fetchall()
+    events = [{"kind": "text", "at": r["edited_at"],
+               "old": r["old_content"], "new": r["new_content"]} for r in texts]
+    events += [{"kind": "tag", "at": r["edited_at"],
+                "old": _tag_text(r["old_tag"], r["old_label"]),
+                "new": _tag_text(r["new_tag"], r["new_label"])} for r in tags]
+    events.sort(key=lambda e: e["at"])
+    return events
