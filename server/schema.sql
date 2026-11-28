@@ -213,3 +213,15 @@ create index dm_message_edits_msg on dm_message_edits (message_id);
 alter table dm_threads       enable row level security;
 alter table dm_messages      enable row level security;
 alter table dm_message_edits enable row level security;
+
+alter table flagged_messages alter column sub_room_id drop not null;
+alter table flagged_messages add column thread_id bigint
+  references dm_threads(thread_id) on delete cascade;
+alter table flagged_messages add constraint flagged_one_place
+  check ((sub_room_id is null) <> (thread_id is null));
+create index flagged_messages_time on flagged_messages (flagged_at desc);
+
+-- optional: old rooms get their host's school department
+update rooms r set department_id = u.school_department_id,
+                   department_name = u.school_department_name
+from users u where u.user_id = r.host_id and r.department_id is null;

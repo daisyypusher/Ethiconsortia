@@ -39,10 +39,15 @@ def _shape(row: dict, role: str) -> dict:
 async def my_rooms(user=Depends(current_user)):
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "select r.room_id, r.room_name, r.description, r.invite_code, m.room_role "
-            "from room_members m join rooms r on r.room_id = m.room_id "
-            "where m.user_id = %s and not r.is_archived order by r.created_at",
-            (user["user_id"],))
+            "select r.room_id, r.room_name, r.description, r.invite_code, "
+            "coalesce(m.room_role, 'admin') as room_role "
+            "from rooms r left join room_members m "
+            "on m.room_id = r.room_id and m.user_id = %(me)s "
+            "where not r.is_archived and (m.user_id is not null or exists ("
+            "  select 1 from users u where u.user_id = %(me)s and u.role = 'admin' "
+            "  and u.school_department_id is not null "
+            "  and u.school_department_id = r.department_id)) "
+            "order by r.created_at", {"me": user["user_id"]})
         rows = await cur.fetchall()
     return [_shape(r, r["room_role"]) for r in rows]
 
@@ -57,10 +62,14 @@ async def create_room(body: RoomIn, user=Depends(current_user)):
             async with pool.connection() as conn:
                 async with conn.transaction():
                     cur = await conn.execute(
-                        "insert into rooms (room_name, description, host_id, invite_code) "
-                        "values (%s, %s, %s, %s) "
+                        "insert into rooms (room_name, description, host_id, invite_code, "
+                        "department_id, department_name) "
+                        "values (%s, %s, %s, %s, "
+                        "(select school_department_id from users where user_id = %s), "
+                        "(select school_department_name from users where user_id = %s)) "
                         "returning room_id, room_name, description, invite_code",
-                        (name, body.description.strip(), user["user_id"], _code()))
+                        (name, body.description.strip(), user["user_id"], _code(),
+                         user["user_id"], user["user_id"]))
                     room = await cur.fetchone()
                     await conn.execute(
                         "insert into room_members (room_id, user_id, room_role, can_manage_members) "

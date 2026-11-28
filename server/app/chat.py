@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-
+from .moderation import screen
 from .auth import current_user
 from .db import pool
 
@@ -57,6 +57,11 @@ def _msg(r: dict, me: int) -> dict:
         "mine": r["sender_id"] == me,
     }
 
+async def _is_dept_admin(conn, room_id: int, user_id: int) -> bool:
+    cur = await conn.execute(
+        "select 1 as x from users u join rooms r on r.department_id = u.school_department_id "
+        "where u.user_id = %s and u.role = 'admin' and r.room_id = %s", (user_id, room_id))
+    return await cur.fetchone() is not None
 
 async def _member(conn, room_id: int, user_id: int):
     cur = await conn.execute(
@@ -64,6 +69,9 @@ async def _member(conn, room_id: int, user_id: int):
         "where room_id = %s and user_id = %s", (room_id, user_id))
     m = await cur.fetchone()
     if not m:
+        if await _is_dept_admin(conn, room_id, user_id):      # admins skip joining
+            return {"room_role": "admin", "can_send_messages": True,
+                    "can_read_history": True}, False
         raise HTTPException(403, "You are not in this room.")
     cur = await conn.execute(
         "select 1 as b from room_bans where room_id = %s and user_id = %s", (room_id, user_id))
@@ -71,7 +79,7 @@ async def _member(conn, room_id: int, user_id: int):
 
 
 def _perms(m: dict, banned: bool, sr: dict):
-    host = m["room_role"] == "host"
+    host = m["room_role"] in ("host", "admin")
     can_read = host or (m["can_read_history"] and sr["everyone_read"])
     can_send = not banned and (host or (m["can_send_messages"] and sr["everyone_send"]))
     return bool(can_read), bool(can_send)
@@ -145,6 +153,8 @@ async def send(sub_room_id: int, body: SendIn, user=Depends(current_user)):
         a = await _access(conn, sub_room_id, user["user_id"])
         if not a["can_send"]:
             raise HTTPException(403, "You can't post here.")
+        await screen(conn, user["user_id"], [("", content), ("tag label", label)],
+                     sub_room_id=sub_room_id)
         cur = await conn.execute(
             "insert into messages (sub_room_id, sender_id, content, tag, tag_label) "
             "values (%s, %s, %s, %s, %s) returning message_id",
@@ -176,6 +186,11 @@ async def edit_message(message_id: int, body: EditIn, user=Depends(current_user)
     if not new:
         raise HTTPException(400, "Message can't be empty.")
     async with pool.connection() as conn:
+        cur = await conn.execute(
+            "select sub_room_id from messages where message_id = %s", (message_id,))
+        row = await cur.fetchone()
+        if row:
+            await screen(conn, user["user_id"], [("", new)], sub_room_id=row["sub_room_id"])
         async with conn.transaction():
             m = await _own_message(conn, message_id, user["user_id"])
             if new != m["content"]:
@@ -193,6 +208,12 @@ async def edit_message(message_id: int, body: EditIn, user=Depends(current_user)
 async def retag_message(message_id: int, body: TagIn, user=Depends(current_user)):
     tag, label = _tag(body.tag, body.tag_label)
     async with pool.connection() as conn:
+        cur = await conn.execute(
+            "select sub_room_id from messages where message_id = %s", (message_id,))
+        row = await cur.fetchone()
+        if row and label:
+            await screen(conn, user["user_id"], [("tag label", label)],
+                         sub_room_id=row["sub_room_id"])
         async with conn.transaction():
             m = await _own_message(conn, message_id, user["user_id"])
             if (tag, label) != (m["tag"], m["tag_label"]):

@@ -2,9 +2,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-
+from .moderation import screen
 from .auth import current_user
-from .chat import EditIn, SendIn, TagIn, _member, _msg, _tag, _tag_text
+from .chat import EditIn, SendIn, TagIn, _is_dept_admin, _member, _msg, _tag, _tag_text
 from .db import pool
 
 router = APIRouter(prefix="/api", tags=["dm"])
@@ -25,7 +25,11 @@ async def _thread(conn, thread_id: int, user_id: int):
         "select thread_id, room_id, user_a, user_b from dm_threads where thread_id = %s",
         (thread_id,))
     t = await cur.fetchone()
-    if not t or user_id not in (t["user_a"], t["user_b"]):
+    if not t:
+        raise HTTPException(404, "No such conversation.")
+    if user_id not in (t["user_a"], t["user_b"]):
+        if await _is_dept_admin(conn, t["room_id"], user_id):     # read-only
+            return {"thread": t, "can_send": False, "admin_view": True}
         raise HTTPException(404, "No such conversation.")
     _, banned = await _member(conn, t["room_id"], user_id)      # 403 if no longer a member
     other = t["user_b"] if t["user_a"] == user_id else t["user_a"]
@@ -79,6 +83,26 @@ async def my_threads(room_id: int, user=Depends(current_user)):
              "name": r["full_name"] or r["username"], "role": r["role"],
              "last_at": r["last_at"]} for r in rows]
 
+@router.get("/rooms/{room_id}/dms/all")
+async def all_threads(room_id: int, user=Depends(current_user)):
+    """Admins of the room's department: every private conversation that has messages."""
+    async with pool.connection() as conn:
+        if not await _is_dept_admin(conn, room_id, user["user_id"]):
+            raise HTTPException(403, "Admins only.")
+        cur = await conn.execute(
+            "select t.thread_id, "
+            "coalesce(nullif(a.full_name, ''), a.username) as a_name, "
+            "coalesce(nullif(b.full_name, ''), b.username) as b_name, "
+            "(select max(m.created_at) from dm_messages m "
+            " where m.thread_id = t.thread_id) as last_at "
+            "from dm_threads t "
+            "join users a on a.user_id = t.user_a join users b on b.user_id = t.user_b "
+            "where t.room_id = %s "
+            "and exists (select 1 from dm_messages x where x.thread_id = t.thread_id) "
+            "order by last_at desc", (room_id,))
+        rows = await cur.fetchall()
+    return [{"thread_id": r["thread_id"], "name": r["a_name"] + " ↔ " + r["b_name"],
+             "last_at": r["last_at"], "admin_view": True} for r in rows]
 
 @router.post("/rooms/{room_id}/dms")
 async def open_thread(room_id: int, body: OpenIn, user=Depends(current_user)):
@@ -146,9 +170,11 @@ async def thread_messages(thread_id: int, after: int | None = None,
                 "or (m.is_edited and m.edited_at > %s)) order by m.message_id",
                 (thread_id, after, since or datetime(1970, 1, 1, tzinfo=timezone.utc)))
         rows = await cur.fetchall()
-        await conn.execute(          # opening the chat marks the other person's messages read
-            "update dm_messages set read_at = now() "
-            "where thread_id = %s and sender_id <> %s and read_at is null", (thread_id, uid))
+        if not a.get("admin_view"):  # an admin peeking must NOT mark them read
+            await conn.execute(      # opening the chat marks the other person's messages read
+                "update dm_messages set read_at = now() "
+                "where thread_id = %s and sender_id <> %s and read_at is null",
+                (thread_id, uid))
         cur = await conn.execute("select now() as now")
         now = (await cur.fetchone())["now"]
     return {"messages": [_msg(r, uid) for r in rows], "now": now, "can_send": a["can_send"]}
@@ -164,6 +190,8 @@ async def send_dm(thread_id: int, body: SendIn, user=Depends(current_user)):
         a = await _thread(conn, thread_id, user["user_id"])
         if not a["can_send"]:
             raise HTTPException(403, "You can't send private messages here.")
+        await screen(conn, user["user_id"], [("", content), ("tag label", label)],
+                     thread_id=thread_id)
         cur = await conn.execute(
             "insert into dm_messages (thread_id, sender_id, content, tag, tag_label) "
             "values (%s, %s, %s, %s, %s) returning message_id",
@@ -179,6 +207,11 @@ async def edit_dm(message_id: int, body: EditIn, user=Depends(current_user)):
     if not new:
         raise HTTPException(400, "Message can't be empty.")
     async with pool.connection() as conn:
+        cur = await conn.execute(
+            "select thread_id from dm_messages where message_id = %s", (message_id,))
+        row = await cur.fetchone()
+        if row:
+            await screen(conn, user["user_id"], [("", new)], thread_id=row["thread_id"])
         async with conn.transaction():
             cur = await conn.execute(
                 "select thread_id, sender_id, content from dm_messages "
@@ -205,6 +238,12 @@ async def edit_dm(message_id: int, body: EditIn, user=Depends(current_user)):
 async def retag_dm(message_id: int, body: TagIn, user=Depends(current_user)):
     tag, label = _tag(body.tag, body.tag_label)
     async with pool.connection() as conn:
+        cur = await conn.execute(
+            "select thread_id from dm_messages where message_id = %s", (message_id,))
+        row = await cur.fetchone()
+        if row and label:
+            await screen(conn, user["user_id"], [("tag label", label)],
+                         thread_id=row["thread_id"])
         async with conn.transaction():
             cur = await conn.execute(
                 "select thread_id, sender_id, tag, tag_label from dm_messages "

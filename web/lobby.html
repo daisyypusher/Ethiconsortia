@@ -17,6 +17,7 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
     <div id="rooms"></div>
     <button class="rail-btn add" id="add" type="button" aria-label="Create or join a room">+</button>
     <div class="rail-foot">
+      <button class="rail-btn" id="bell" type="button" aria-label="Flagged messages" hidden>⚠<span class="badge-n" id="bell-n" hidden></span></button>
       <button class="rail-btn" id="inbox" type="button" aria-label="Private messages" hidden>✉<span class="badge-n" id="inbox-n" hidden></span></button>
       <button class="rail-btn" id="theme" type="button" aria-label="Switch light or dark mode">◐</button>
       <button class="rail-btn" id="out" type="button" aria-label="Sign out">⎋</button>
@@ -31,7 +32,10 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
       <button class="mini" id="newdm" type="button" aria-label="New private message">+</button>
     </div>
     <div id="dms" role="list"></div>
+    <div class="sec" id="adms-head" hidden><span>All private messages</span></div>
+    <div id="adms" role="list"></div>
     <p class="empty" id="subs-note">Pick a room to see its sub-rooms.</p>
+    <button class="words-btn" id="words" type="button" hidden>Filtered words</button>
     <div class="userbar"><span id="who"></span><small id="role"></small></div>
   </aside>
 
@@ -43,6 +47,7 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
     </div>
     <section class="chat" id="chat" hidden>
       <header class="chat-head" id="chat-title"></header>
+      <div class="dm-note" id="dm-note" hidden></div>
       <div class="feed" id="feed" aria-live="polite"></div>
       <form class="composer" id="composer" novalidate>
         <div class="composer-row">
@@ -113,11 +118,35 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
   <button class="link" id="hclose" type="button">Close</button>
 </dialog>
 
+<dialog id="wdlg">
+  <h2>Filtered words</h2>
+  <p class="note" id="wnote"></p>
+  <div id="wlist"></div>
+  <form id="wform" novalidate>
+    <label for="wword">New word</label>
+    <input id="wword" maxlength="50" autocomplete="off">
+    <label class="check" id="wallbox" hidden><input id="wall" type="checkbox"> Apply to all rooms</label>
+    <button class="btn" type="submit">Add</button>
+  </form>
+  <div class="status" id="wst" role="status" aria-live="polite"></div>
+  <button class="link" id="wclose" type="button">Close</button>
+</dialog>
+
+<dialog id="adlg" class="wide">
+  <h2>Flagged messages</h2>
+  <div id="alist"></div>
+  <button class="link" id="aclose" type="button">Close</button>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
 <script>
 var $=function(i){return document.getElementById(i)};
 var rooms=[],current=null;
 var subs=[],sub=null,lastId=0,since=null,seen={},timer=null,busy=false,editing=null;
 var dms=[],me=null,unreadAll=[],unreadByRoom={},unreadByThread={},unreadSig="";
+var lastDm=null,alertN=null;
+var adms=[];
 var JH={"Content-Type":"application/json"};
 var TAGS={none:"No tag",announcement:"Announcement",question:"Question",
   emergency:"Emergency",wrong_sent:"Wrong sent",other:"Other"};
@@ -184,9 +213,11 @@ $("tag").onchange=function(){$("label").hidden=this.value!=="other"};
 $("etag").onchange=function(){$("elabel").hidden=this.value!=="other"};
 
 async function pick(r){
-  current=r;dms=[];drawRail();closeChat();
+  current=r;dms=[];adms=[];drawRail();closeChat();
+  $("adms").textContent="";$("adms-head").hidden=true;
   $("room-name").textContent=r.room_name;
   $("hello").textContent=r.room_name;
+  $("words").hidden=!(me&&(me.role==="professor"||me.role==="admin"));
   $("sub").textContent=r.description||"Pick a sub-room to start.";
   var inv=$("invite");
   if(r.invite_code){inv.hidden=false;inv.textContent="Invite code: "+r.invite_code}
@@ -214,6 +245,14 @@ async function loadDms(){
     if(current!==r)return;
     dms=l;drawDms();
   }catch(e){}
+  if(me&&me.role==="admin"){
+    try{
+      var all=await api("/api/rooms/"+r.room_id+"/dms/all");
+      if(current!==r)return;
+      adms=all;
+    }catch(e){adms=[]}                 // 403 = not an admin of this room's department
+    drawAdms();
+  }
 }
 
 function drawSubs(){
@@ -238,6 +277,18 @@ function drawDms(){
   });
 }
 
+function drawAdms(){
+  var box=$("adms");box.textContent="";
+  $("adms-head").hidden=!adms.length;
+  adms.forEach(function(d){
+    var b=el("button","sub-row","👁 "+d.name);
+    b.type="button";b.setAttribute("role","listitem");
+    if(sub&&sub.admin_view&&keyOf(sub)===keyOf(d))b.setAttribute("aria-current","true");
+    b.onclick=function(){openChat(d)};
+    box.appendChild(b);
+  });
+}
+
 function stopPoll(){if(timer){clearInterval(timer);timer=null}}
 function closeChat(){
   stopPoll();sub=null;
@@ -246,20 +297,25 @@ function closeChat(){
 function setComposer(ok){
   $("msg").disabled=!ok;$("tag").disabled=!ok;$("label").disabled=!ok;
   $("msg").placeholder=ok?"Message":
+    (sub&&sub.admin_view?"Read-only: admin view.":
     (sub&&sub.thread_id?"You can't send private messages here.":
-     (sub&&sub.kind==="announcement"?"Only the host can post here.":"You can't post here."));
+     (sub&&sub.kind==="announcement"?"Only the host can post here.":"You can't post here.")));
 }
 function nearBottom(){var f=$("feed");return f.scrollHeight-f.scrollTop-f.clientHeight<80}
 function scrollDown(){var f=$("feed");f.scrollTop=f.scrollHeight}
 
 async function openChat(c){
   stopPoll();sub=c;lastId=0;since=null;seen={};busy=false;
-  drawSubs();drawDms();
+  drawSubs();drawDms();drawAdms();
   $("stage").hidden=true;$("chat").hidden=false;
   $("chat-title").textContent=c.thread_id?"🔒 "+c.name:
     (c.kind==="announcement"?"📢 ":"# ")+c.name;
   $("feed").textContent="";$("cst").textContent="";
-  setComposer(c.thread_id?true:c.can_send);
+  setComposer(c.admin_view?false:(c.thread_id?true:c.can_send));
+  var note=$("dm-note");
+  note.hidden=!c.thread_id;
+  note.textContent=c.admin_view?"👁 Admin view. Read-only."
+    :"🔒 Only the two people here and administrators can see this conversation.";
   await poll(true);
   if(sub===c)timer=setInterval(function(){if(!document.hidden)poll()},2000);
 }
@@ -442,20 +498,109 @@ function drawInbox(){
 async function pollUnread(){
   if(document.hidden||!me)return;
   try{
-    var list=await api("/api/dms/unread"),missing=false;
+    var list=await api("/api/dms/unread"),missing=false,total=0;
     unreadAll=list;unreadByRoom={};unreadByThread={};
     list.forEach(function(u){
       if(sub&&sub.thread_id===u.thread_id)return;     // the open chat marks itself read
+      total+=u.n;
       unreadByRoom[u.room_id]=(unreadByRoom[u.room_id]||0)+u.n;
       unreadByThread[u.thread_id]=u.n;
       if(current&&current.room_id===u.room_id&&
          !dms.some(function(d){return d.thread_id===u.thread_id}))missing=true;
     });
+    if(lastDm!==null&&total>lastDm){
+      var f=list.find(function(u){return !(sub&&sub.thread_id===u.thread_id)});
+      if(f){ping($("inbox-n"));
+        toast("✉ "+f.from_name+" · "+f.room_name,function(){openThread(f.room_id,f.thread_id)})}
+    }
+    lastDm=total;
     var sig=JSON.stringify([unreadByRoom,unreadByThread,unreadAll.length]);
     if(sig!==unreadSig){unreadSig=sig;drawRail();drawDms();drawInbox()}   // redraw only on change
     if(missing)loadDms();
   }catch(e){}
 }
+
+/* ---------- notifications ---------- */
+function ping(n){n.classList.remove("pulse");void n.offsetWidth;n.classList.add("pulse")}
+function toast(text,onclick){
+  var t=el("button","toast",text);t.type="button";
+  t.onclick=function(){t.remove();if(onclick)onclick()};
+  $("toasts").appendChild(t);
+  setTimeout(function(){t.classList.add("out");setTimeout(function(){t.remove()},300)},5000);
+}
+
+/* ---------- flagged alerts ---------- */
+async function pollAlerts(){
+  if(document.hidden||!me)return;
+  try{
+    var d=await api("/api/alerts/count"),n=$("bell-n");
+    $("bell").hidden=!d.show;n.hidden=!d.unread;n.textContent=d.unread;
+    if(alertN!==null&&d.unread>alertN){ping(n);toast("⚠ New flagged message",openAlerts)}
+    alertN=d.unread;
+  }catch(e){}
+}
+async function openAlerts(){
+  var box=$("alist");box.textContent="Loading…";$("adlg").showModal();
+  try{
+    var l=await api("/api/alerts");
+    box.textContent="";
+    if(!l.length)box.textContent="No flagged messages.";
+    l.forEach(function(a){
+      var d=el("div","hist"+(a.unread?" unread":""));
+      d.appendChild(el("div",null,a.room_name+" · "+a.place));
+      d.appendChild(el("div",null,a.sender+" · "+(a.category==="suspicious"?"Suspicious":"Filtered")));
+      d.appendChild(el("div",null,a.original));
+      d.appendChild(el("div","msg-time",fmt(a.flagged_at)));
+      box.appendChild(d);
+    });
+    var ids=l.filter(function(a){return a.unread}).map(function(a){return a.id});
+    if(ids.length){
+      await api("/api/alerts/read",{method:"POST",headers:JH,body:JSON.stringify({ids:ids})});
+      pollAlerts();
+    }
+  }catch(err){box.textContent=err.message}
+}
+$("bell").onclick=openAlerts;
+$("aclose").onclick=function(){$("adlg").close()};
+
+/* ---------- filtered words ---------- */
+async function loadWords(){
+  var box=$("wlist");
+  try{
+    var l=await api("/api/rooms/"+current.room_id+"/words");
+    box.textContent="";
+    if(!l.length)box.textContent="No custom words yet.";
+    l.forEach(function(w){
+      var row=el("div","word-row");
+      row.appendChild(el("span",null,w.word+(w.scope==="all"?"  (all rooms)":"")));
+      if(w.scope!=="all"||me.role==="admin"){
+        var b=el("button",null,"Remove");b.type="button";
+        b.onclick=async function(){
+          try{await api("/api/words/"+w.word_id,{method:"DELETE"});loadWords()}
+          catch(err){$("wst").dataset.state="error";$("wst").textContent=err.message}
+        };
+        row.appendChild(b);
+      }
+      box.appendChild(row);
+    });
+  }catch(err){box.textContent=err.message}
+}
+$("words").onclick=function(){
+  if(!current)return;
+  $("wst").textContent="";$("wword").value="";$("wall").checked=false;
+  $("wallbox").hidden=me.role!=="admin";
+  $("wnote").textContent="Messages with these words are held back in "+current.room_name+".";
+  $("wdlg").showModal();loadWords();
+};
+$("wform").onsubmit=async function(e){
+  e.preventDefault();var st=$("wst");st.dataset.state="";
+  try{
+    await api("/api/rooms/"+current.room_id+"/words",{method:"POST",headers:JH,
+      body:JSON.stringify({word:$("wword").value,all_rooms:$("wall").checked})});
+    $("wword").value="";st.textContent="";loadWords();
+  }catch(err){st.dataset.state="error";st.textContent=err.message}
+};
+$("wclose").onclick=function(){$("wdlg").close()};
 
 async function act(path,body){
   var st=$("dst");st.dataset.state="";st.textContent="Working…";
@@ -490,6 +635,8 @@ $("out").onclick=async function(){
     drawRail();
     pollUnread();
     setInterval(pollUnread,4000);
+    pollAlerts();
+    setInterval(pollAlerts,4000);
   }catch(e){}
 })();
 </script>

@@ -4,6 +4,7 @@ from .auth import router as auth_router
 from .rooms import router as rooms_router
 from .chat import router as chat_router
 from .dm import router as dm_router
+from .alerts import router as alerts_router
 
 from contextlib import asynccontextmanager
 
@@ -43,4 +44,5 @@ app.include_router(auth_router)
 app.include_router(rooms_router)
 app.include_router(chat_router)
 app.include_router(dm_router)
+app.include_router(alerts_router)
 app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
