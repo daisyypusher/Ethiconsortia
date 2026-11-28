@@ -180,3 +180,54 @@ dialog.wide{width:min(92vw,640px)}
 
 .dm-note{padding:8px 24px;border-bottom:1px solid var(--hairline);background:var(--card);
   color:var(--muted);font-size:13px;letter-spacing:-.13px}
+
+/* chat header buttons */
+.chat-head{display:flex;align-items:center;gap:12px}
+#chat-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.head-btn{flex:none;width:36px;height:36px;border:0;border-radius:50%;background:var(--chip);
+  color:var(--ink);font-size:16px;cursor:pointer;transition:transform .15s}
+.head-btn:active{transform:scale(.95)}
+#nav{display:none}
+
+/* members panel */
+.app.members-open{grid-template-columns:72px 240px 1fr 260px}
+.people{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--card);
+  border-left:1px solid var(--hairline)}
+.people-head{display:flex;justify-content:space-between;align-items:center;padding:16px;
+  border-bottom:1px solid var(--hairline);font:600 17px var(--display)}
+#plist{flex:1;overflow-y:auto;padding-bottom:16px}
+.person{display:flex;align-items:center;gap:12px;padding:8px 16px}
+.avatar.sm{width:32px;height:32px;border-radius:16px;font-size:14px}
+.person-info{flex:1;min-width:0}
+.person-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.person-sub{color:var(--alert);font-size:12px}
+.person.banned .person-name{color:var(--alert)}
+.person button{padding:6px 10px;border:0;border-radius:9999px;background:var(--chip);
+  color:var(--link);font:400 13px var(--text);cursor:pointer}
+.person button.danger{color:var(--alert)}
+
+/* phones */
+.app{height:100dvh}
+.scrim{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:30}
+@keyframes slide-in{from{transform:translateX(100%)}to{transform:none}}
+@media (max-width:640px){
+  .scrim{display:block}
+  #nav{display:inline-grid;place-items:center}
+  .app,.app.members-open{grid-template-columns:72px 1fr}
+  .subs{display:flex;position:fixed;top:0;bottom:0;left:72px;width:min(80vw,280px);z-index:40;
+    transform:translateX(-120%);transition:transform .25s}
+  .app.subs-open .subs{transform:none}
+  .people{position:fixed;top:0;right:0;bottom:0;width:min(86vw,320px);z-index:40;
+    animation:slide-in .25s cubic-bezier(.2,.8,.2,1)}
+  .sub-row{padding:12px}
+  .person{padding:10px 16px}
+  .person button{min-height:44px;padding:0 14px}
+  .head-btn{width:44px;height:44px}
+  .chat-head,.feed,.composer,.dm-note{padding-left:16px;padding-right:16px}
+  .msg-col{max-width:85%}
+  .toasts{left:16px;right:16px;align-items:stretch}
+  .toast{max-width:none}
+}
+@media (prefers-reduced-motion:reduce){
+  .subs{transition:none}.people{animation:none}.head-btn{transition:none}
+}

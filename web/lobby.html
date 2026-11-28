@@ -12,7 +12,7 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
 <link rel="stylesheet" href="lobby.css">
 </head>
 <body>
-<div class="app">
+<div class="app" id="app">
   <nav class="rail" aria-label="Rooms">
     <div id="rooms"></div>
     <button class="rail-btn add" id="add" type="button" aria-label="Create or join a room">+</button>
@@ -46,7 +46,11 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
       <div class="invite" id="invite" hidden></div>
     </div>
     <section class="chat" id="chat" hidden>
-      <header class="chat-head" id="chat-title"></header>
+      <header class="chat-head">
+        <button class="head-btn" id="nav" type="button" aria-label="Rooms and sub-rooms">☰</button>
+        <span id="chat-title"></span>
+        <button class="head-btn" id="ppl" type="button" aria-label="Members">👥</button>
+      </header>
       <div class="dm-note" id="dm-note" hidden></div>
       <div class="feed" id="feed" aria-live="polite"></div>
       <form class="composer" id="composer" novalidate>
@@ -60,7 +64,16 @@ document.documentElement.dataset.theme=t||(matchMedia("(prefers-color-scheme: da
       </form>
     </section>
   </main>
+
+  <aside class="people" id="people" hidden aria-label="Members">
+    <div class="people-head">
+      <span>Members · <span id="pcount">0</span></span>
+      <button class="head-btn" id="pclose" type="button" aria-label="Close members">✕</button>
+    </div>
+    <div id="plist"></div>
+  </aside>
 </div>
+<div class="scrim" id="scrim" hidden></div>
 
 <dialog id="dlg">
   <form id="create" novalidate>
@@ -147,6 +160,8 @@ var subs=[],sub=null,lastId=0,since=null,seen={},timer=null,busy=false,editing=n
 var dms=[],me=null,unreadAll=[],unreadByRoom={},unreadByThread={},unreadSig="";
 var lastDm=null,alertN=null;
 var adms=[];
+var peopleOpen=false,peopleSig="";
+var GROUPS=[["host","Host"],["admin","Administrators"],["professor","Professors"],["student","Students"]];
 var JH={"Content-Type":"application/json"};
 var TAGS={none:"No tag",announcement:"Announcement",question:"Question",
   emergency:"Emergency",wrong_sent:"Wrong sent",other:"Other"};
@@ -215,6 +230,7 @@ $("etag").onchange=function(){$("elabel").hidden=this.value!=="other"};
 async function pick(r){
   current=r;dms=[];adms=[];drawRail();closeChat();
   $("adms").textContent="";$("adms-head").hidden=true;
+  peopleSig="";if(peopleOpen)loadPeople();
   $("room-name").textContent=r.room_name;
   $("hello").textContent=r.room_name;
   $("words").hidden=!(me&&(me.role==="professor"||me.role==="admin"));
@@ -308,6 +324,7 @@ async function openChat(c){
   stopPoll();sub=c;lastId=0;since=null;seen={};busy=false;
   drawSubs();drawDms();drawAdms();
   $("stage").hidden=true;$("chat").hidden=false;
+  $("app").classList.remove("subs-open");syncScrim();
   $("chat-title").textContent=c.thread_id?"🔒 "+c.name:
     (c.kind==="announcement"?"📢 ":"# ")+c.name;
   $("feed").textContent="";$("cst").textContent="";
@@ -520,6 +537,70 @@ async function pollUnread(){
   }catch(e){}
 }
 
+/* ---------- members panel ---------- */
+function syncScrim(){
+  $("scrim").hidden=!($("app").classList.contains("subs-open")||peopleOpen);
+}
+function setPeople(open){
+  peopleOpen=open;
+  $("people").hidden=!open;
+  $("app").classList.toggle("members-open",open);
+  syncScrim();
+  if(open){peopleSig="";loadPeople()}
+}
+$("ppl").onclick=function(){setPeople(!peopleOpen)};
+$("pclose").onclick=function(){setPeople(false)};
+$("nav").onclick=function(){$("app").classList.toggle("subs-open");syncScrim()};
+$("scrim").onclick=function(){$("app").classList.remove("subs-open");setPeople(false)};
+
+async function loadPeople(){
+  var r=current;if(!r||!peopleOpen)return;
+  try{
+    var l=await api("/api/rooms/"+r.room_id+"/people");
+    if(current!==r||!peopleOpen)return;
+    var sig=JSON.stringify(l);
+    if(sig===peopleSig)return;                  // nothing changed: no redraw
+    peopleSig=sig;drawPeople(l);
+  }catch(e){$("plist").textContent=e.message}
+}
+function groupOf(p){return p.room_role==="host"?"host":p.role}
+async function personAct(method,path,ask){
+  if(ask&&!confirm(ask))return;
+  try{await api(path,{method:method});peopleSig="";loadPeople()}
+  catch(err){alert(err.message)}
+}
+function drawPeople(l){
+  var box=$("plist");box.textContent="";
+  $("pcount").textContent=l.length;
+  GROUPS.forEach(function(g){
+    var items=l.filter(function(p){return groupOf(p)===g[0]});
+    if(!items.length)return;
+    box.appendChild(el("div","sec",g[1]+" · "+items.length));
+    items.forEach(function(p){
+      var row=el("div","person"+(p.banned?" banned":""));
+      var av=el("div","avatar sm",(Array.from(p.name.trim())[0]||"?").toUpperCase());
+      av.style.background="hsl("+(p.user_id*47%360)+" 55% 42%)";
+      row.appendChild(av);
+      var info=el("div","person-info");
+      info.appendChild(el("div","person-name",p.name+(p.me?" (you)":"")));
+      if(p.banned)info.appendChild(el("div","person-sub","Banned"));
+      row.appendChild(info);
+      var base="/api/rooms/"+current.room_id+"/members/"+p.user_id;
+      if(p.can_unban){
+        var u=el("button",null,"Unban");u.type="button";
+        u.onclick=function(){personAct("POST",base+"/unban",null)};
+        row.appendChild(u);
+      }
+      if(p.can_kick){
+        var k=el("button","danger","Kick");k.type="button";
+        k.onclick=function(){personAct("DELETE",base,"Remove "+p.name+" from this room?")};
+        row.appendChild(k);
+      }
+      box.appendChild(row);
+    });
+  });
+}
+
 /* ---------- notifications ---------- */
 function ping(n){n.classList.remove("pulse");void n.offsetWidth;n.classList.add("pulse")}
 function toast(text,onclick){
@@ -637,6 +718,7 @@ $("out").onclick=async function(){
     setInterval(pollUnread,4000);
     pollAlerts();
     setInterval(pollAlerts,4000);
+    setInterval(function(){if(!document.hidden)loadPeople()},4000);
   }catch(e){}
 })();
 </script>
